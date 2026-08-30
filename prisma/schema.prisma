@@ -1,0 +1,101 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Transaction {
+  id            String  @id @default(cuid())
+  paymentId     String  @unique
+  customerEmail String
+  amount        Float
+  currency      String  @default("INR")
+  status        String
+  failureReason String?
+  recoverable   Boolean @default(false)
+
+  recoveryStatus String  @default("PENDING")
+  recoveryAction String?
+  recommendation String?
+  confidence     Float?
+  reason         String?
+
+  recovered       Boolean   @default(false)
+  recoveredAmount Float?
+  recoveredAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  recoveryEvents RecoveryEvent[]
+  paymentEvents  PaymentEvent[]
+}
+
+model RecoveryEvent {
+  id            String   @id @default(cuid())
+  transactionId String
+  eventType     String
+  action        String?
+  message       String?
+  createdAt     DateTime @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+}
+
+model PaymentEvent {
+  id            String   @id @default(cuid())
+  transactionId String
+  eventType     String
+
+  channel     String?
+  provider    String?
+  status      String
+  failureCode String?
+  latencyMs   Int?
+
+  amount   Float
+  currency String   @default("INR")
+
+  createdAt DateTime @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([status])
+  @@index([channel])
+  @@index([provider])
+  @@index([createdAt])
+}
+
+model Incident {
+  id                 String   @id @default(cuid())
+  status             String   @default("DETECTED")
+  severity           String
+  type               String
+
+  detectedAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  channel  String?
+  provider String?
+
+  failureCount Int @default(0)
+
+  revenueAtRisk      Float @default(0)
+  recoverableRevenue Float @default(0)
+
+  diagnosis          String?
+  confidence         Float?
+
+  recommendedAction String?
+  guardrailStatus   String?
+  recoveryStatus    String?
+
+  @@index([status])
+  @@index([severity])
+  @@index([type])
+}
