@@ -16,12 +16,19 @@ model Transaction {
   failureReason String?
   recoverable   Boolean @default(false)
 
+  // Razorpay identifiers
+  razorpayOrderId     String? @unique
+  razorpayPaymentId   String?
+  razorpayPaymentLinkId String? @unique
+
+  // RECOVR recovery state
   recoveryStatus String  @default("PENDING")
   recoveryAction String?
   recommendation String?
   confidence     Float?
   reason         String?
 
+  // Recovery outcome
   recovered       Boolean   @default(false)
   recoveredAmount Float?
   recoveredAt     DateTime?
@@ -58,7 +65,7 @@ model PaymentEvent {
   latencyMs   Int?
 
   amount   Float
-  currency String   @default("INR")
+  currency String @default("INR")
 
   createdAt DateTime @default(now())
 

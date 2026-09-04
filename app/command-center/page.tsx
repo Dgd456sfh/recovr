@@ -1,825 +1,1825 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ArrowDownRight,
+  ArrowUpRight,
+  Check,
+  CircleAlert,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  TrendingUp,
+  X,
+  Zap,
+} from "lucide-react";
 
-type RecoveryResult = {
-  transactionId: string;
+/* =========================================================
+   TYPES
+========================================================= */
+
+type Recommendation =
+  | "RETRY"
+  | "PAYMENT_LINK"
+  | "REVIEW"
+  | "NO_ACTION";
+
+type RecoveryCase = {
+  id: string;
   paymentId: string;
   customerEmail: string;
   amount: number;
   currency: string;
+
+  status: string;
   failureReason: string | null;
-  channel: string | null;
-  provider: string | null;
-  recommendation: "RETRY" | "PAYMENT_LINK" | "WAIT" | "REVIEW";
-  recoveryProbability: number;
-  expectedRecoveredRevenue: number;
+
+  recoverable: boolean;
+  recovered: boolean;
+
+  recoveryStatus: string;
+  recoveryAction: string | null;
+
+  recommendation: Recommendation;
   confidence: number;
-  risk: "LOW" | "MEDIUM" | "HIGH";
-  reasoning: string;
+  priority: "HIGH" | "MEDIUM" | "LOW";
+  reason: string;
+  shouldRecover: boolean;
 
-  guardrails?: {
-    originalAction: string;
-    finalAction: string;
-    overridden: boolean;
-    approved: boolean;
-    triggered: string[];
-    reasons: string[];
-  };
-
-  orchestration?: {
-    action: string;
-    recoveryStatus: string;
-    message: string;
-  };
-
-  simulated?: boolean;
+  createdAt: string;
+  updatedAt: string;
 };
 
-type RecoveryResponse = {
-  success: boolean;
-  processed: number;
+type RecoveredTransaction = {
+  id: string;
+  paymentId: string;
+  customerEmail: string;
+  amount: number;
+  currency: string;
+
+  status: string;
+  recovered: boolean;
+  recoveredAmount: number | null;
+  recoveredAt?: string | null;
+
+  recoveryStatus: string;
+  recoveryAction: string | null;
+
+  createdAt: string;
+  updatedAt: string;
+};
+
+type Overview = {
+  activeIncidents: number;
+  totalIncidents: number;
+
   revenueAtRisk: number;
-  expectedRecoveredRevenue: number;
+  recoverableRevenue: number;
+  recoveredRevenue: number;
 
-  summary?: {
-    approvedActions: number;
-    guardrailsOverridden: number;
-    reviewRequired: number;
-    waiting: number;
-    retries: number;
-    paymentLinks: number;
-  };
+  recoveredCases: number;
+  activeRecoveryCases: number;
 
-  results: RecoveryResult[];
-  message?: string;
-  error?: string;
+  recoveryRate: number;
+
+  currency: string;
+};
+
+type Health = {
+  status: "HEALTHY" | "DEGRADED";
+  anomalyDetected: boolean;
+
+  totalEvents: number;
+  successfulEvents: number;
+  failedEvents: number;
+
+  successRate: number;
+  failureRate: number;
+
+  reason: string;
+};
+
+type ActivityItem = {
+  id: string;
+  transactionId: string;
+  paymentId: string;
+  customerEmail: string;
+
+  type: string;
+  action: string;
+  message: string;
+
+  amount: number;
+  createdAt: string;
 };
 
 type CommandCenterResponse = {
   success: boolean;
-  overview?: any;
-  health?: any;
-  incidents?: any[];
-  recoveryQueue?: any;
-  activity?: any;
   generatedAt?: string;
+
+  overview?: Overview;
+
+  health?: Health;
+
+  incidents?: {
+    total: number;
+    active: number;
+    items: unknown[];
+  };
+
+  recoveryQueue?: {
+    total: number;
+    actionable: number;
+    items: RecoveryCase[];
+  };
+
+  activity?: {
+    total: number;
+    items: ActivityItem[];
+  };
+
   error?: string;
 };
 
-function formatINR(value: number) {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 0,
-  }).format(value);
-}
+type ActionType =
+  | "RETRY"
+  | "PAYMENT_LINK"
+  | "MARK_RECOVERED";
 
-function percent(value: number) {
-  return `${Math.round(value * 100)}%`;
-}
+/* =========================================================
+   EMPTY STATE
+========================================================= */
 
-function actionClass(action: string) {
-  switch (action) {
-    case "RETRY":
-      return "bg-black text-white";
+const EMPTY_OVERVIEW: Overview = {
+  activeIncidents: 0,
+  totalIncidents: 0,
 
-    case "PAYMENT_LINK":
-      return "bg-[#5f5cff] text-white";
+  revenueAtRisk: 0,
+  recoverableRevenue: 0,
+  recoveredRevenue: 0,
 
-    case "WAIT":
-      return "bg-yellow-100 text-black";
+  recoveredCases: 0,
+  activeRecoveryCases: 0,
 
-    case "REVIEW":
-    default:
-      return "bg-red-100 text-black";
-  }
-}
+  recoveryRate: 0,
 
-function riskClass(risk: string) {
-  switch (risk) {
-    case "LOW":
-      return "bg-green-100";
+  currency: "INR",
+};
 
-    case "HIGH":
-      return "bg-red-100";
+const EMPTY_HEALTH: Health = {
+  status: "HEALTHY",
+  anomalyDetected: false,
 
-    case "MEDIUM":
-    default:
-      return "bg-yellow-100";
-  }
-}
+  totalEvents: 0,
+  successfulEvents: 0,
+  failedEvents: 0,
 
-export default function CommandCenterPage() {
+  successRate: 0,
+  failureRate: 0,
+
+  reason: "No system health data available.",
+};
+
+/* =========================================================
+   DASHBOARD
+========================================================= */
+
+export default function Dashboard() {
   const [data, setData] =
     useState<CommandCenterResponse | null>(null);
-
-  const [recovery, setRecovery] =
-    useState<RecoveryResponse | null>(null);
 
   const [loading, setLoading] =
     useState(true);
 
-  const [runningAI, setRunningAI] =
+  const [search, setSearch] =
+    useState("");
+
+  const [analysisRunning, setAnalysisRunning] =
     useState(false);
 
-  const [error, setError] =
-    useState("");
+  const [actionLoading, setActionLoading] =
+    useState<string | null>(null);
 
-  const [recoveryError, setRecoveryError] =
-    useState("");
+  const [actionMessage, setActionMessage] =
+    useState<string | null>(null);
 
-  const loadCommandCenter = useCallback(
-    async () => {
-      try {
-        setError("");
+  /* =======================================================
+     LOAD DASHBOARD
+  ======================================================= */
 
-        const response = await fetch(
-          "/api/command-center",
-          {
-            method: "GET",
-            cache: "no-store",
-          }
-        );
+  useEffect(() => {
+    void loadDashboard();
+  }, []);
 
-        if (!response.ok) {
-          throw new Error(
-            "Failed to load command center"
-          );
-        }
-
-        const result =
-          (await response.json()) as CommandCenterResponse;
-
-        if (!result.success) {
-          throw new Error(
-            result.error ||
-              "Unable to load command center"
-          );
-        }
-
-        setData(result);
-      } catch (err) {
-        console.error(err);
-
-        setError(
-          "Unable to load RECOVR command center."
-        );
-      } finally {
-        setLoading(false);
-      }
-    },
-    []
-  );
-
-  async function runAIRecovery() {
+  async function loadDashboard() {
     try {
-      setRunningAI(true);
-      setRecoveryError("");
+      setLoading(true);
 
       const response = await fetch(
-        "/api/recovery/ai",
+        "/api/command-center",
+        {
+          method: "GET",
+          cache: "no-store",
+          headers: {
+            Accept: "application/json",
+          },
+        }
+      );
+
+      const text = await response.text();
+
+      let result: CommandCenterResponse;
+
+      try {
+        result = text
+          ? JSON.parse(text)
+          : {
+              success: false,
+            };
+      } catch {
+        throw new Error(
+          "Command Center API returned invalid JSON."
+        );
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          result.error ||
+            `Command Center failed (${response.status})`
+        );
+      }
+
+      setData(result);
+
+      if (!result.success) {
+        setActionMessage(
+          result.error ||
+            "Unable to load Recovery Command Center."
+        );
+      } else {
+        setActionMessage(null);
+      }
+    } catch (error) {
+      console.error(
+        "RECOVR dashboard error:",
+        error
+      );
+
+      setData({
+        success: false,
+        overview: EMPTY_OVERVIEW,
+        health: EMPTY_HEALTH,
+        recoveryQueue: {
+          total: 0,
+          actionable: 0,
+          items: [],
+        },
+        activity: {
+          total: 0,
+          items: [],
+        },
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to load dashboard.",
+      });
+
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to load dashboard."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /* =======================================================
+     RUN RECOVERY ANALYSIS
+  ======================================================= */
+
+  async function runRecoveryAnalysis() {
+    try {
+      setAnalysisRunning(true);
+      setActionMessage(null);
+
+      const response = await fetch(
+        "/api/orchestrate",
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            Accept: "application/json",
           },
-          cache: "no-store",
         }
       );
 
-      const result =
-        (await response.json()) as RecoveryResponse;
+      const text = await response.text();
 
-      if (!response.ok || !result.success) {
+      let result: {
+        success?: boolean;
+        error?: string;
+      } = {};
+
+      try {
+        result = text
+          ? JSON.parse(text)
+          : {};
+      } catch {
         throw new Error(
-          result.error ||
-            "AI recovery analysis failed."
+          "Recovery analysis returned invalid JSON."
         );
       }
 
-      setRecovery(result);
+      if (!response.ok) {
+        throw new Error(
+          result.error ||
+            "Recovery analysis failed."
+        );
+      }
 
-      await loadCommandCenter();
-    } catch (err) {
-      console.error(err);
+      await loadDashboard();
 
-      setRecoveryError(
-        err instanceof Error
-          ? err.message
-          : "AI recovery analysis failed."
+      setActionMessage(
+        "Recovery analysis completed successfully."
+      );
+    } catch (error) {
+      console.error(
+        "RECOVR analysis error:",
+        error
+      );
+
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Recovery analysis failed."
       );
     } finally {
-      setRunningAI(false);
+      setAnalysisRunning(false);
     }
   }
 
-  useEffect(() => {
-    loadCommandCenter();
+  /* =======================================================
+     EXECUTE RECOVERY
+  ======================================================= */
 
-    const interval = setInterval(() => {
-      loadCommandCenter();
-    }, 15000);
+  async function executeRecovery(
+    transactionId: string,
+    action: ActionType
+  ) {
+    try {
+      setActionLoading(transactionId);
+      setActionMessage(null);
 
-    return () => clearInterval(interval);
-  }, [loadCommandCenter]);
+      const response = await fetch(
+        "/api/recovery/execute",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            transactionId,
+            action,
+          }),
+        }
+      );
 
-  if (loading) {
-    return (
-      <main className="min-h-screen bg-[#f7f7f2] px-6 py-10 text-black md:px-10">
-        <div className="mx-auto max-w-7xl">
-          <div className="animate-pulse">
-            <div className="h-4 w-32 rounded bg-black/10" />
+      const text = await response.text();
 
-            <div className="mt-4 h-16 w-[520px] max-w-full rounded bg-black/10" />
+      let result: {
+        success?: boolean;
+        error?: string;
+      } = {};
 
-            <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              {[1, 2, 3, 4].map((item) => (
-                <div
-                  key={item}
-                  className="h-36 rounded-3xl border border-black/10 bg-white"
-                />
-              ))}
-            </div>
+      try {
+        result = text
+          ? JSON.parse(text)
+          : {};
+      } catch {
+        throw new Error(
+          "Recovery execution returned invalid JSON."
+        );
+      }
 
-            <div className="mt-6 h-48 rounded-3xl border border-black/10 bg-white" />
-          </div>
-        </div>
-      </main>
-    );
+      if (!response.ok) {
+        throw new Error(
+          result.error ||
+            "Recovery action failed."
+        );
+      }
+
+      if (action === "RETRY") {
+        setActionMessage(
+          "Payment retry scheduled successfully."
+        );
+      } else if (
+        action === "PAYMENT_LINK"
+      ) {
+        setActionMessage(
+          "Payment link generated successfully."
+        );
+      } else {
+        setActionMessage(
+          "Payment marked as recovered successfully."
+        );
+      }
+
+      await loadDashboard();
+    } catch (error) {
+      console.error(
+        "RECOVR execution error:",
+        error
+      );
+
+      setActionMessage(
+        error instanceof Error
+          ? error.message
+          : "Recovery action failed."
+      );
+    } finally {
+      setActionLoading(null);
+    }
   }
 
-  if (error || !data) {
-    return (
-      <main className="min-h-screen bg-[#f7f7f2] px-6 py-10 text-black md:px-10">
-        <div className="mx-auto max-w-7xl">
-          <div className="rounded-3xl border-2 border-black bg-white p-8">
-            <p className="text-sm font-black uppercase tracking-[0.2em] text-[#5f5cff]">
-              RECOVR
-            </p>
+  /* =======================================================
+     NORMALIZED DATA
+  ======================================================= */
 
-            <h1 className="mt-3 text-3xl font-black">
-              Command Center unavailable
-            </h1>
+  const overview: Overview = {
+    ...EMPTY_OVERVIEW,
+    ...(data?.overview ?? {}),
+  };
 
-            <p className="mt-3 text-black/60">
-              {error ||
-                "Something went wrong while loading the dashboard."}
-            </p>
+  const health: Health = {
+    ...EMPTY_HEALTH,
+    ...(data?.health ?? {}),
+  };
 
-            <button
-              onClick={loadCommandCenter}
-              className="mt-6 rounded-full border-2 border-black bg-[#5f5cff] px-6 py-3 text-sm font-bold text-white transition hover:-translate-y-0.5"
-            >
-              Retry
-            </button>
-          </div>
-        </div>
-      </main>
+  const recoveryCases: RecoveryCase[] =
+    Array.isArray(
+      data?.recoveryQueue?.items
+    )
+      ? data.recoveryQueue.items
+      : [];
+
+  /*
+   * IMPORTANT:
+   *
+   * Your old dashboard only showed recoveryQueue.
+   * That excludes already recovered transactions.
+   *
+   * We therefore get recovered information from
+   * overview + activity.
+   */
+
+  const activity: ActivityItem[] =
+    Array.isArray(data?.activity?.items)
+      ? data.activity.items
+      : [];
+
+  /* =======================================================
+     SEARCH
+  ======================================================= */
+
+  const filteredCases =
+    useMemo(() => {
+      const query =
+        search
+          .toLowerCase()
+          .trim();
+
+      if (!query) {
+        return recoveryCases;
+      }
+
+      return recoveryCases.filter(
+        (item) =>
+          item.paymentId
+            ?.toLowerCase()
+            .includes(query) ||
+          item.customerEmail
+            ?.toLowerCase()
+            .includes(query) ||
+          (
+            item.failureReason ??
+            ""
+          )
+            .toLowerCase()
+            .includes(query) ||
+          item.recommendation
+            ?.toLowerCase()
+            .includes(query)
+      );
+    }, [recoveryCases, search]);
+
+  /* =======================================================
+     VALUES
+  ======================================================= */
+
+  const revenueAtRisk =
+    Number(
+      overview.revenueAtRisk
+    ) || 0;
+
+  const recoveredRevenue =
+    Number(
+      overview.recoveredRevenue
+    ) || 0;
+
+  const recoveredCases =
+    Number(
+      overview.recoveredCases
+    ) || 0;
+
+  const activeRecoveryCases =
+    Number(
+      overview.activeRecoveryCases
+    ) || 0;
+
+  const recoveryRate =
+    Number(
+      overview.recoveryRate
+    ) || 0;
+
+  const totalTransactions =
+    Number(
+      health.totalEvents
+    ) || 0;
+
+  const failedTransactions =
+    Number(
+      health.failedEvents
+    ) || 0;
+
+  /* =======================================================
+     FAILURE BREAKDOWN
+  ======================================================= */
+
+  const failureBreakdown =
+    getFailureBreakdown(
+      recoveryCases
     );
-  }
 
-  const overview = data.overview || {};
+  /* =======================================================
+     RECENT RECOVERY ACTIVITY
+  ======================================================= */
+
+  const recoveryActivity =
+    activity.filter(
+      (item) =>
+        item.type?.includes(
+          "RECOVERY"
+        ) ||
+        item.action
+    );
 
   return (
-    <main className="min-h-screen bg-[#f7f7f2] px-6 py-8 text-black md:px-10 md:py-10">
-      <div className="mx-auto max-w-7xl">
+    <main className="min-h-screen bg-[#f5f5f0] text-[#111]">
 
-        {/* HEADER */}
+      {/* =================================================
+          HEADER
+      ================================================= */}
 
-        <header className="flex flex-col justify-between gap-6 border-b-2 border-black pb-8 md:flex-row md:items-end">
-          <div>
-            <p className="text-sm font-black uppercase tracking-[0.2em] text-[#5f5cff]">
-              RECOVR / COMMAND CENTER
-            </p>
+      <header className="border-b border-black/10 bg-[#f5f5f0]">
+        <div className="mx-auto flex h-[72px] max-w-[1500px] items-center justify-between px-5 md:px-8">
 
-            <h1 className="mt-3 text-5xl font-black tracking-[-0.05em] md:text-7xl">
-              Revenue
-              <br />
-              recovery control.
-            </h1>
+          <a
+            href="/"
+            className="text-xl font-black tracking-[-0.08em]"
+          >
+            RECO
+            <span className="text-[#5f5cff]">
+              VR
+            </span>
+          </a>
 
-            <p className="mt-5 max-w-2xl text-base font-medium leading-7 text-black/60">
-              Detect payment degradation, quantify revenue
-              exposure, apply recovery intelligence and
-              orchestrate safe recovery actions.
-            </p>
-          </div>
+          <nav className="hidden items-center gap-7 text-[11px] font-semibold md:flex">
 
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2 rounded-full border-2 border-black bg-white px-4 py-2 text-sm font-bold">
-              <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#5f5cff]" />
-              LIVE
+            <a
+              href="/command-center"
+              className="text-[#5f5cff]"
+            >
+              Command Center
+            </a>
+
+            <a
+              href="/cases"
+              className="transition hover:text-[#5f5cff]"
+            >
+              Recovery Cases
+            </a>
+
+            <a
+              href="/analytics"
+              className="transition hover:text-[#5f5cff]"
+            >
+              Analytics
+            </a>
+
+            <a
+              href="/audit"
+              className="transition hover:text-[#5f5cff]"
+            >
+              Audit Log
+            </a>
+
+          </nav>
+
+          <div className="flex items-center gap-3">
+
+            <div className="hidden text-right md:block">
+              <div className="text-[10px] font-bold">
+                Demo Merchant
+              </div>
+
+              <div className="text-[9px] text-black/50">
+                Razorpay Test Mode
+              </div>
             </div>
 
-            <button
-              onClick={loadCommandCenter}
-              className="rounded-full border-2 border-black bg-black px-5 py-2.5 text-sm font-bold text-white transition hover:bg-[#5f5cff]"
-            >
-              Refresh
-            </button>
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#111] text-[10px] font-bold text-white">
+              DM
+            </div>
 
-            <button
-              onClick={runAIRecovery}
-              disabled={runningAI}
-              className="rounded-full border-2 border-black bg-[#5f5cff] px-5 py-2.5 text-sm font-bold text-white transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {runningAI
-                ? "AI ANALYZING..."
-                : "Run AI Recovery"}
-            </button>
           </div>
-        </header>
 
-        {/* AI ERROR */}
+        </div>
+      </header>
 
-        {recoveryError && (
-          <div className="mt-6 rounded-3xl border-2 border-red-600 bg-red-50 p-5">
-            <p className="text-sm font-black uppercase tracking-[0.15em] text-red-600">
-              AI RECOVERY ERROR
+      {/* =================================================
+          CONTENT
+      ================================================= */}
+
+      <div className="mx-auto max-w-[1500px] px-5 py-8 md:px-8 md:py-10">
+
+        {/* TITLE */}
+
+        <div className="flex flex-col justify-between gap-5 md:flex-row md:items-end">
+
+          <div>
+
+            <div className="text-[9px] font-bold tracking-[0.2em] text-[#5f5cff]">
+              RECOVERY COMMAND CENTER
+            </div>
+
+            <h1 className="mt-3 text-[42px] font-black tracking-[-0.06em] md:text-[58px]">
+              Revenue Recovery
+            </h1>
+
+            <p className="mt-2 text-[12px] text-black/60">
+              Monitor revenue at risk,
+              recovery decisions and outcomes.
             </p>
 
-            <p className="mt-2 font-medium">
-              {recoveryError}
-            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={runRecoveryAnalysis}
+            disabled={analysisRunning}
+            className="flex w-fit items-center gap-2 rounded-full bg-[#111] px-5 py-3 text-[11px] font-bold text-white transition hover:bg-[#5f5cff] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Sparkles size={13} />
+
+            {analysisRunning
+              ? "Analyzing..."
+              : "Run Recovery Analysis"}
+          </button>
+
+        </div>
+
+        {/* MESSAGE */}
+
+        {actionMessage && (
+          <div className="mt-5 rounded-xl border border-black/10 bg-white px-4 py-3 text-[10px] font-semibold">
+            {actionMessage}
           </div>
         )}
 
-        {/* OVERVIEW */}
+        {/* =================================================
+            METRICS
+        ================================================= */}
 
-        <section className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-10 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
 
-          <div className="rounded-3xl border-2 border-black bg-white p-6">
-            <p className="text-xs font-black uppercase tracking-[0.15em] text-black/50">
-              Revenue at risk
-            </p>
-
-            <p className="mt-4 text-4xl font-black tracking-[-0.04em]">
-              {formatINR(
-                recovery?.revenueAtRisk ??
-                  Number(
-                    overview.revenueAtRisk ?? 0
+          <MetricCard
+            label="Revenue At Risk"
+            value={
+              loading
+                ? "—"
+                : formatINR(
+                    revenueAtRisk
                   )
-              )}
-            </p>
+            }
+            change={
+              loading
+                ? "Loading..."
+                : `${activeRecoveryCases} active`
+            }
+            negative
+            icon={CircleAlert}
+          />
 
-            <p className="mt-2 text-sm font-medium text-black/50">
-              Failed recoverable revenue
-            </p>
-          </div>
-
-          <div className="rounded-3xl border-2 border-black bg-white p-6">
-            <p className="text-xs font-black uppercase tracking-[0.15em] text-black/50">
-              Expected recovery
-            </p>
-
-            <p className="mt-4 text-4xl font-black tracking-[-0.04em]">
-              {formatINR(
-                recovery?.expectedRecoveredRevenue ??
-                  Number(
-                    overview.expectedRecoveredRevenue ??
-                      0
+          <MetricCard
+            label="Recovered"
+            value={
+              loading
+                ? "—"
+                : formatINR(
+                    recoveredRevenue
                   )
-              )}
-            </p>
+            }
+            change={`${recoveredCases} recovered cases`}
+            icon={TrendingUp}
+          />
 
-            <p className="mt-2 text-sm font-medium text-black/50">
-              AI-estimated recovered value
-            </p>
-          </div>
+          <MetricCard
+            label="Recovery Rate"
+            value={
+              loading
+                ? "—"
+                : `${recoveryRate}%`
+            }
+            change={`${activeRecoveryCases} active opportunities`}
+            icon={ArrowUpRight}
+          />
 
-          <div className="rounded-3xl border-2 border-black bg-white p-6">
-            <p className="text-xs font-black uppercase tracking-[0.15em] text-black/50">
-              Failed payments
-            </p>
+          <MetricCard
+            label="Active Cases"
+            value={
+              loading
+                ? "—"
+                : String(
+                    activeRecoveryCases
+                  )
+            }
+            change={`${totalTransactions} total events`}
+            icon={Zap}
+          />
 
-            <p className="mt-4 text-4xl font-black tracking-[-0.04em]">
-              {recovery?.processed ??
-                Number(
-                  overview.failedPayments ??
-                    overview.failed ??
-                    0
-                )}
-            </p>
+        </div>
 
-            <p className="mt-2 text-sm font-medium text-black/50">
-              Recoverable transactions
-            </p>
-          </div>
+        {/* =================================================
+            RECOVERY SUCCESS BANNER
+        ================================================= */}
 
-          <div className="rounded-3xl border-2 border-black bg-[#5f5cff] p-6 text-white">
-            <p className="text-xs font-black uppercase tracking-[0.15em] text-white/70">
-              AI status
-            </p>
+        {recoveredCases > 0 && (
+          <section className="mt-6 rounded-[24px] border border-[#177245]/15 bg-[#eaf8ef] p-6">
 
-            <p className="mt-4 text-4xl font-black tracking-[-0.04em]">
-              {recovery
-                ? "ACTIVE"
-                : "READY"}
-            </p>
+            <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
 
-            <p className="mt-2 text-sm font-medium text-white/70">
-              {recovery
-                ? `${recovery.processed} payments analyzed`
-                : "Ready for recovery analysis"}
-            </p>
-          </div>
-        </section>
+              <div className="flex items-start gap-4">
 
-        {/* AI SUMMARY */}
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#177245] text-white">
+                  <Check size={20} />
+                </div>
 
-        {recovery?.summary && (
-          <section className="mt-6 rounded-3xl border-2 border-black bg-black p-6 text-white">
-            <div className="flex flex-col justify-between gap-5 md:flex-row md:items-end">
-              <div>
-                <p className="text-xs font-black uppercase tracking-[0.18em] text-[#a9a7ff]">
-                  AI RECOVERY SUMMARY
-                </p>
+                <div>
 
-                <h2 className="mt-2 text-3xl font-black tracking-[-0.04em]">
-                  Decision engine complete.
-                </h2>
+                  <div className="text-[9px] font-bold tracking-[0.18em] text-[#177245]">
+                    RECOVERY SUCCESS
+                  </div>
+
+                  <div className="mt-1 text-[20px] font-black">
+                    Revenue successfully recovered
+                  </div>
+
+                  <div className="mt-1 text-[10px] text-black/60">
+                    RECOVR has successfully recovered{" "}
+                    {recoveredCases}{" "}
+                    transaction
+                    {recoveredCases !== 1
+                      ? "s"
+                      : ""}{" "}
+                    through the recovery workflow.
+                  </div>
+
+                </div>
+
               </div>
 
-              <div className="text-sm font-bold text-white/60">
-                {recovery.processed} transactions analyzed
-              </div>
-            </div>
+              <div className="text-left md:text-right">
 
-            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+                <div className="text-[28px] font-black tracking-[-0.05em]">
+                  {formatINR(
+                    recoveredRevenue
+                  )}
+                </div>
 
-              <div className="rounded-2xl border border-white/20 p-4">
-                <p className="text-xs text-white/50">
-                  Approved
-                </p>
-                <p className="mt-2 text-2xl font-black">
-                  {recovery.summary.approvedActions}
-                </p>
-              </div>
+                <div className="text-[9px] font-bold text-[#177245]">
+                  RECOVERED REVENUE
+                </div>
 
-              <div className="rounded-2xl border border-white/20 p-4">
-                <p className="text-xs text-white/50">
-                  Overridden
-                </p>
-                <p className="mt-2 text-2xl font-black">
-                  {recovery.summary.guardrailsOverridden}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-white/20 p-4">
-                <p className="text-xs text-white/50">
-                  Review
-                </p>
-                <p className="mt-2 text-2xl font-black">
-                  {recovery.summary.reviewRequired}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-white/20 p-4">
-                <p className="text-xs text-white/50">
-                  Waiting
-                </p>
-                <p className="mt-2 text-2xl font-black">
-                  {recovery.summary.waiting}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-white/20 p-4">
-                <p className="text-xs text-white/50">
-                  Retries
-                </p>
-                <p className="mt-2 text-2xl font-black">
-                  {recovery.summary.retries}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-white/20 p-4">
-                <p className="text-xs text-white/50">
-                  Payment links
-                </p>
-                <p className="mt-2 text-2xl font-black">
-                  {recovery.summary.paymentLinks}
-                </p>
               </div>
 
             </div>
+
           </section>
         )}
 
-        {/* RECOVERY DECISIONS */}
+        {/* =================================================
+            PERFORMANCE + RISK
+        ================================================= */}
 
-        {recovery && recovery.results.length > 0 && (
-          <section className="mt-6">
+        <div className="mt-6 grid gap-5 lg:grid-cols-[1.4fr_0.6fr]">
 
-            <div className="mb-4 flex flex-col justify-between gap-2 md:flex-row md:items-end">
+          {/* PERFORMANCE */}
+
+          <section className="rounded-[24px] border border-black/10 bg-white p-5 md:p-7">
+
+            <div className="flex items-start justify-between">
+
               <div>
-                <p className="text-xs font-black uppercase tracking-[0.18em] text-[#5f5cff]">
-                  RECOVERY INTELLIGENCE
-                </p>
 
-                <h2 className="mt-1 text-3xl font-black tracking-[-0.04em]">
-                  AI decisions
-                </h2>
+                <div className="text-[9px] font-bold tracking-[0.18em] text-black/50">
+                  RECOVERY PERFORMANCE
+                </div>
+
+                <div className="mt-2 text-[22px] font-black tracking-[-0.04em]">
+                  Revenue recovery
+                </div>
+
               </div>
 
-              <p className="text-sm font-medium text-black/50">
-                Gemini → Guardrails → Orchestrator
-              </p>
+              <div className="rounded-lg border border-black/10 bg-white px-3 py-2 text-[10px]">
+                Live dataset
+              </div>
+
             </div>
 
-            <div className="space-y-4">
+            <div className="mt-8 grid gap-3 sm:grid-cols-3">
 
-              {recovery.results.map(
+              <PerformanceStat
+                label="Recovered Revenue"
+                value={formatINR(
+                  recoveredRevenue
+                )}
+              />
+
+              <PerformanceStat
+                label="Revenue At Risk"
+                value={formatINR(
+                  revenueAtRisk
+                )}
+              />
+
+              <PerformanceStat
+                label="Recovery Rate"
+                value={`${recoveryRate}%`}
+              />
+
+            </div>
+
+            {/* BAR */}
+
+            <div className="mt-8">
+
+              <div className="mb-2 flex justify-between text-[9px] font-bold">
+                <span className="text-black/50">
+                  RECOVERY PROGRESS
+                </span>
+
+                <span>
+                  {recoveryRate}%
+                </span>
+              </div>
+
+              <div className="h-3 overflow-hidden rounded-full bg-black/5">
+
+                <div
+                  className="h-full rounded-full bg-[#5f5cff] transition-all"
+                  style={{
+                    width: `${Math.max(
+                      0,
+                      Math.min(
+                        recoveryRate,
+                        100
+                      )
+                    )}%`,
+                  }}
+                />
+
+              </div>
+
+            </div>
+
+            {/* HEALTH */}
+
+            <div className="mt-8 flex items-center justify-between rounded-xl bg-[#f5f5f0] px-4 py-3">
+
+              <div className="flex items-center gap-2">
+
+                <div
+                  className={`h-2 w-2 rounded-full ${
+                    health.status ===
+                    "HEALTHY"
+                      ? "bg-[#177245]"
+                      : "bg-[#d95d5d]"
+                  }`}
+                />
+
+                <span className="text-[10px] font-bold">
+                  System{" "}
+                  {health.status ===
+                  "HEALTHY"
+                    ? "healthy"
+                    : "degraded"}
+                </span>
+
+              </div>
+
+              <span className="text-[9px] text-black/50">
+                {health.successRate}% success rate
+              </span>
+
+            </div>
+
+          </section>
+
+          {/* RISK */}
+
+          <section className="rounded-[24px] bg-[#111] p-6 text-white md:p-7">
+
+            <div className="text-[9px] font-bold tracking-[0.18em] text-white/35">
+              REVENUE AT RISK
+            </div>
+
+            <div className="mt-4 text-[42px] font-black tracking-[-0.06em]">
+              {loading
+                ? "—"
+                : formatINR(
+                    revenueAtRisk
+                  )}
+            </div>
+
+            <div className="mt-2 flex items-center gap-2 text-[10px] text-[#ff9898]">
+              <ArrowDownRight size={13} />
+              Based on current failed transactions
+            </div>
+
+            <div className="mt-10 space-y-4">
+
+              {failureBreakdown.length >
+              0 ? (
+                failureBreakdown.map(
+                  (item) => (
+                    <RiskRow
+                      key={item.label}
+                      label={item.label}
+                      amount={formatINR(
+                        item.amount
+                      )}
+                      percentage={
+                        item.percentage
+                      }
+                    />
+                  )
+                )
+              ) : (
+                <div className="rounded-xl bg-white/5 p-4 text-[10px] text-white/50">
+                  No active failed-payment risk.
+                </div>
+              )}
+
+            </div>
+
+          </section>
+
+        </div>
+
+        {/* =================================================
+            RECOVERY QUEUE
+        ================================================= */}
+
+        <section className="mt-6 rounded-[24px] border border-black/10 bg-white">
+
+          <div className="flex flex-col gap-4 border-b border-black/10 p-5 md:flex-row md:items-center md:justify-between md:p-6">
+
+            <div>
+
+              <div className="text-[9px] font-bold tracking-[0.18em] text-black/50">
+                ACTIVE RECOVERY CASES
+              </div>
+
+              <div className="mt-1 text-lg font-black">
+                Recovery Queue
+              </div>
+
+            </div>
+
+            <div className="flex items-center gap-2 rounded-xl border border-black/10 px-3 py-2 md:w-[300px]">
+
+              <Search
+                size={13}
+                className="text-black/50"
+              />
+
+              <input
+                value={search}
+                onChange={(event) =>
+                  setSearch(
+                    event.target.value
+                  )
+                }
+                placeholder="Search cases..."
+                className="w-full bg-transparent text-[10px] outline-none placeholder:text-black/40"
+              />
+
+              {search && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSearch("")
+                  }
+                  aria-label="Clear search"
+                >
+                  <X size={12} />
+                </button>
+              )}
+
+            </div>
+
+          </div>
+
+          {loading ? (
+            <div className="p-10 text-center text-[11px] text-black/50">
+              Loading recovery cases...
+            </div>
+          ) : filteredCases.length ===
+            0 ? (
+            <div className="p-10 text-center">
+
+              <div className="text-[12px] font-bold">
+                No active recovery cases
+              </div>
+
+              <div className="mt-1 text-[10px] text-black/40">
+                RECOVR currently has no
+                failed transactions requiring
+                intervention.
+              </div>
+
+            </div>
+          ) : (
+            <>
+
+              <div className="hidden grid-cols-[1fr_1.2fr_1fr_0.7fr_1.2fr] gap-4 border-b border-black/10 px-6 py-3 text-[8px] font-bold tracking-wider text-black/50 md:grid">
+
+                <span>CASE</span>
+                <span>CUSTOMER</span>
+                <span>AMOUNT</span>
+                <span>RECOVERY</span>
+                <span>ACTION</span>
+
+              </div>
+
+              {filteredCases.map(
                 (item) => (
-                  <article
-                    key={item.transactionId}
-                    className="rounded-3xl border-2 border-black bg-white p-6"
-                  >
-
-                    {/* TOP */}
-
-                    <div className="flex flex-col justify-between gap-5 lg:flex-row">
-
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-
-                          <span
-                            className={`rounded-full px-3 py-1 text-xs font-black ${actionClass(
-                              item.recommendation
-                            )}`}
-                          >
-                            {item.recommendation}
-                          </span>
-
-                          <span
-                            className={`rounded-full px-3 py-1 text-xs font-black ${riskClass(
-                              item.risk
-                            )}`}
-                          >
-                            {item.risk} RISK
-                          </span>
-
-                          {item.guardrails?.approved && (
-                            <span className="rounded-full border border-black px-3 py-1 text-xs font-black">
-                              GUARDRAIL APPROVED
-                            </span>
-                          )}
-
-                        </div>
-
-                        <h3 className="mt-4 text-xl font-black">
-                          {item.paymentId}
-                        </h3>
-
-                        <p className="mt-1 text-sm font-medium text-black/50">
-                          {item.customerEmail}
-                        </p>
-                      </div>
-
-                      <div className="text-left lg:text-right">
-                        <p className="text-xs font-black uppercase tracking-[0.15em] text-black/40">
-                          Payment
-                        </p>
-
-                        <p className="mt-1 text-3xl font-black">
-                          {formatINR(item.amount)}
-                        </p>
-
-                        <p className="mt-1 text-sm font-bold text-black/50">
-                          {percent(
-                            item.recoveryProbability
-                          )}{" "}
-                          recovery probability
-                        </p>
-                      </div>
-
-                    </div>
-
-                    {/* DETAILS */}
-
-                    <div className="mt-6 grid gap-3 md:grid-cols-4">
-
-                      <div className="rounded-2xl bg-[#f5f5f0] p-4">
-                        <p className="text-xs font-black uppercase tracking-[0.12em] text-black/40">
-                          Failure
-                        </p>
-
-                        <p className="mt-2 font-bold">
-                          {item.failureReason ||
-                            "Unknown"}
-                        </p>
-                      </div>
-
-                      <div className="rounded-2xl bg-[#f5f5f0] p-4">
-                        <p className="text-xs font-black uppercase tracking-[0.12em] text-black/40">
-                          Provider
-                        </p>
-
-                        <p className="mt-2 font-bold">
-                          {item.provider ||
-                            "Unknown"}
-                        </p>
-                      </div>
-
-                      <div className="rounded-2xl bg-[#f5f5f0] p-4">
-                        <p className="text-xs font-black uppercase tracking-[0.12em] text-black/40">
-                          Confidence
-                        </p>
-
-                        <p className="mt-2 font-bold">
-                          {percent(item.confidence)}
-                        </p>
-                      </div>
-
-                      <div className="rounded-2xl bg-[#f5f5f0] p-4">
-                        <p className="text-xs font-black uppercase tracking-[0.12em] text-black/40">
-                          Expected recovery
-                        </p>
-
-                        <p className="mt-2 font-bold">
-                          {formatINR(
-                            item.expectedRecoveredRevenue
-                          )}
-                        </p>
-                      </div>
-
-                    </div>
-
-                    {/* REASONING */}
-
-                    <div className="mt-4 rounded-2xl border border-black/10 bg-[#f7f7f2] p-4">
-                      <p className="text-xs font-black uppercase tracking-[0.12em] text-black/40">
-                        AI reasoning
-                      </p>
-
-                      <p className="mt-2 text-sm font-medium leading-6">
-                        {item.reasoning}
-                      </p>
-                    </div>
-
-                    {/* GUARDRAILS */}
-
-                    {item.guardrails && (
-                      <div className="mt-4 rounded-2xl border-2 border-black p-4">
-
-                        <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
-
-                          <div>
-                            <p className="text-xs font-black uppercase tracking-[0.12em] text-[#5f5cff]">
-                              Safety layer
-                            </p>
-
-                            <p className="mt-1 font-black">
-                              {item.guardrails.overridden
-                                ? "Action overridden by guardrails"
-                                : "AI action approved"}
-                            </p>
-                          </div>
-
-                          <div className="text-sm font-bold">
-                            {item.guardrails.originalAction}
-                            {" → "}
-                            {item.guardrails.finalAction}
-                          </div>
-
-                        </div>
-
-                        {item.guardrails.triggered.length > 0 && (
-                          <div className="mt-4 flex flex-wrap gap-2">
-                            {item.guardrails.triggered.map(
-                              (trigger) => (
-                                <span
-                                  key={trigger}
-                                  className="rounded-full bg-black px-3 py-1 text-xs font-bold text-white"
-                                >
-                                  {trigger}
-                                </span>
-                              )
-                            )}
-                          </div>
-                        )}
-
-                      </div>
-                    )}
-
-                    {/* ORCHESTRATION */}
-
-                    {item.orchestration && (
-                      <div className="mt-4 flex flex-col justify-between gap-4 rounded-2xl bg-[#5f5cff] p-5 text-white md:flex-row md:items-center">
-
-                        <div>
-                          <p className="text-xs font-black uppercase tracking-[0.14em] text-white/60">
-                            Orchestration
-                          </p>
-
-                          <p className="mt-1 text-lg font-black">
-                            {item.orchestration.recoveryStatus}
-                          </p>
-
-                          <p className="mt-1 text-sm font-medium text-white/70">
-                            {item.orchestration.message}
-                          </p>
-                        </div>
-
-                        <div className="rounded-full border border-white/30 px-4 py-2 text-xs font-black">
-                          {item.orchestration.action}
-                        </div>
-
-                      </div>
-                    )}
-
-                  </article>
+                  <RecoveryCaseRow
+                    key={item.id}
+                    item={item}
+                    actionLoading={
+                      actionLoading
+                    }
+                    onExecute={
+                      executeRecovery
+                    }
+                  />
                 )
               )}
 
+            </>
+          )}
+
+        </section>
+
+        {/* =================================================
+            RECOVERED TRANSACTIONS
+        ================================================= */}
+
+        <section className="mt-6 rounded-[24px] border border-black/10 bg-white">
+
+          <div className="border-b border-black/10 p-5 md:p-6">
+
+            <div className="text-[9px] font-bold tracking-[0.18em] text-[#177245]">
+              SUCCESSFUL RECOVERIES
             </div>
-          </section>
-        )}
 
-        {/* EXISTING COMMAND CENTER COMPONENTS */}
+            <div className="mt-1 text-lg font-black">
+              Recovered Transactions
+            </div>
 
-        {!recovery && (
-          <>
-            <section className="mt-6 grid gap-6 lg:grid-cols-2">
-              <div className="rounded-3xl border-2 border-black bg-white p-6">
-                <p className="text-xs font-black uppercase tracking-[0.18em] text-[#5f5cff]">
-                  SYSTEM
-                </p>
+            <div className="mt-1 text-[10px] text-black/50">
+              Transactions successfully recovered by RECOVR.
+            </div>
 
-                <h2 className="mt-2 text-2xl font-black">
-                  Recovery engine ready.
-                </h2>
+          </div>
 
-                <p className="mt-3 text-sm font-medium leading-6 text-black/60">
-                  Run AI Recovery to analyze all recoverable
-                  failed payments using payment history,
-                  provider context, incident severity and
-                  recovery guardrails.
-                </p>
+          {recoveredCases === 0 ? (
+            <div className="p-10 text-center text-[10px] text-black/40">
+              No recovered transactions yet.
+            </div>
+          ) : (
+            <div className="divide-y divide-black/10">
 
-                <button
-                  onClick={runAIRecovery}
-                  disabled={runningAI}
-                  className="mt-6 rounded-full border-2 border-black bg-[#5f5cff] px-5 py-3 text-sm font-black text-white disabled:opacity-50"
-                >
-                  {runningAI
-                    ? "Analyzing..."
-                    : "Analyze recoverable payments"}
-                </button>
-              </div>
+              {getRecoveredActivity(
+                activity
+              )
+                .slice(0, 10)
+                .map((item) => (
+                  <RecoveredRow
+                    key={item.id}
+                    item={item}
+                  />
+                ))}
 
-              <div className="rounded-3xl border-2 border-black bg-white p-6">
-                <p className="text-xs font-black uppercase tracking-[0.18em] text-[#5f5cff]">
-                  PIPELINE
-                </p>
-
-                <div className="mt-5 space-y-3">
-
-                  {[
-                    "Payment failure detected",
-                    "Incident context loaded",
-                    "Gemini recovery decision",
-                    "Guardrail evaluation",
-                    "Recovery orchestration",
-                  ].map((step, index) => (
-                    <div
-                      key={step}
-                      className="flex items-center gap-3"
-                    >
-                      <span className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-black text-xs font-black">
-                        {index + 1}
-                      </span>
-
-                      <span className="text-sm font-bold">
-                        {step}
-                      </span>
-                    </div>
-                  ))}
-
+              {getRecoveredActivity(
+                activity
+              ).length === 0 && (
+                <div className="p-10 text-center text-[10px] text-black/40">
+                  {recoveredCases} recovered case
+                  {recoveredCases !== 1
+                    ? "s"
+                    : ""}{" "}
+                  recorded, but detailed
+                  recovery activity is not
+                  available.
                 </div>
+              )}
+
+            </div>
+          )}
+
+        </section>
+
+        {/* =================================================
+            INTELLIGENCE + POLICY
+        ================================================= */}
+
+        <div className="mt-6 grid gap-5 lg:grid-cols-2">
+
+          {/* INTELLIGENCE */}
+
+          <section className="rounded-[24px] border border-black/10 bg-white p-6">
+
+            <div className="flex items-center justify-between">
+
+              <div>
+
+                <div className="text-[9px] font-bold tracking-[0.18em] text-black/50">
+                  RECOVERY INTELLIGENCE
+                </div>
+
+                <div className="mt-2 text-lg font-black">
+                  Latest analysis
+                </div>
+
               </div>
-            </section>
-          </>
-        )}
 
-        {/* FOOTER */}
+              <Sparkles
+                size={18}
+                className="text-[#5f5cff]"
+              />
 
-        <footer className="mt-10 flex flex-col justify-between gap-3 border-t-2 border-black py-6 text-xs font-bold uppercase tracking-[0.14em] text-black/50 md:flex-row">
+            </div>
+
+            <div className="mt-7 rounded-2xl bg-[#f5f5f0] p-5">
+
+              <div className="text-[9px] font-bold tracking-wider text-black/50">
+                DETECTED PATTERN
+              </div>
+
+              <div className="mt-2 text-[15px] font-bold">
+
+                {failedTransactions > 0
+                  ? "Payment failures detected"
+                  : "No active failure pattern"}
+
+              </div>
+
+              <p className="mt-2 text-[10px] leading-5 text-black/60">
+
+                {failedTransactions >
+                0
+                  ? `${failedTransactions} failed transaction${
+                      failedTransactions !==
+                      1
+                        ? "s"
+                        : ""
+                    } currently require recovery evaluation.`
+                  : "The current transaction dataset does not contain failed payments requiring intervention."}
+
+              </p>
+
+            </div>
+
+            <div className="mt-3 rounded-2xl border border-[#5f5cff]/15 bg-[#5f5cff]/5 p-5">
+
+              <div className="text-[9px] font-bold tracking-wider text-[#5f5cff]">
+                RECOMMENDATION
+              </div>
+
+              <div className="mt-2 text-[15px] font-black">
+                Prioritize high-confidence recovery actions.
+              </div>
+
+              <div className="mt-4 flex items-center gap-2 text-[9px] font-bold text-black/60">
+
+                <ShieldCheck size={13} />
+
+                Policy constraints satisfied
+
+              </div>
+
+            </div>
+
+          </section>
+
+          {/* POLICY */}
+
+          <section className="rounded-[24px] bg-[#111] p-6 text-white">
+
+            <div className="flex items-center justify-between">
+
+              <div>
+
+                <div className="text-[9px] font-bold tracking-[0.18em] text-white/35">
+                  POLICY ENGINE
+                </div>
+
+                <div className="mt-2 text-lg font-black">
+                  Bounded recovery
+                </div>
+
+              </div>
+
+              <ShieldCheck
+                size={18}
+                className="text-[#72d89b]"
+              />
+
+            </div>
+
+            <div className="mt-7 space-y-2">
+
+              <PolicyRow
+                label="Maximum attempts"
+                value="3"
+              />
+
+              <PolicyRow
+                label="Minimum confidence"
+                value="75%"
+              />
+
+              <PolicyRow
+                label="Maximum amount"
+                value="₹50,000"
+              />
+
+              <PolicyRow
+                label="Duplicate actions"
+                value="BLOCKED"
+              />
+
+            </div>
+
+            <div className="mt-5 flex items-center justify-between rounded-2xl bg-[#72d89b]/10 p-4">
+
+              <div className="flex items-center gap-2 text-[10px] font-bold text-[#72d89b]">
+
+                <Check size={13} />
+
+                {health.status ===
+                "HEALTHY"
+                  ? "System healthy"
+                  : "System degraded"}
+
+              </div>
+
+              <span className="text-[9px] text-white/30">
+                {health.anomalyDetected
+                  ? "Anomaly detected"
+                  : "0 policy violations"}
+              </span>
+
+            </div>
+
+          </section>
+
+        </div>
+
+        {/* =================================================
+            FOOTER
+        ================================================= */}
+
+        <div className="mt-12 flex flex-col gap-2 border-t border-black/10 pt-6 text-[9px] text-black/50 md:flex-row md:justify-between">
+
           <span>
-            RECOVR Revenue Intelligence
+            RECOVR · Revenue Recovery Control Tower
           </span>
 
           <span>
-            Updated{" "}
-            {data.generatedAt
-              ? new Date(
-                  data.generatedAt
-                ).toLocaleString()
-              : "—"}
+            Razorpay Test Mode · Demo Environment
           </span>
-        </footer>
+
+        </div>
 
       </div>
+
     </main>
+  );
+}
+
+/* =========================================================
+   RECOVERY CASE ROW
+========================================================= */
+
+function RecoveryCaseRow({
+  item,
+  actionLoading,
+  onExecute,
+}: {
+  item: RecoveryCase;
+  actionLoading: string | null;
+  onExecute: (
+    transactionId: string,
+    action: ActionType
+  ) => Promise<void>;
+}) {
+  const hasExecuted =
+    item.recoveryStatus ===
+      "RETRY_SCHEDULED" ||
+    item.recoveryStatus ===
+      "PAYMENT_LINK_GENERATED";
+
+  const isLoading =
+    actionLoading === item.id;
+
+  return (
+    <div className="border-b border-black/10 p-5 md:px-6">
+
+      <div className="grid gap-4 md:grid-cols-[1fr_1.2fr_1fr_0.7fr_1.2fr] md:items-center">
+
+        <div>
+
+          <div className="text-[8px] font-bold text-black/40">
+            PAYMENT
+          </div>
+
+          <div className="mt-1 text-[11px] font-bold">
+            {item.paymentId}
+          </div>
+
+        </div>
+
+        <div>
+
+          <div className="text-[8px] font-bold text-black/40 md:hidden">
+            CUSTOMER
+          </div>
+
+          <div className="mt-1 text-[11px] font-semibold">
+            {item.customerEmail}
+          </div>
+
+        </div>
+
+        <div>
+
+          <div className="text-[8px] font-bold text-black/40 md:hidden">
+            AMOUNT
+          </div>
+
+          <div className="mt-1 text-[16px] font-black">
+            {formatINR(item.amount)}
+          </div>
+
+        </div>
+
+        <div>
+
+          <div className="text-[8px] font-bold text-black/40 md:hidden">
+            RECOVERY
+          </div>
+
+          <div className="mt-1 text-[12px] font-bold text-[#5f5cff]">
+            {Math.round(
+              item.confidence * 100
+            )}
+            %
+          </div>
+
+        </div>
+
+        <div>
+
+          <span
+            className={`inline-flex rounded-full px-3 py-1.5 text-[8px] font-bold ${
+              item.recommendation ===
+              "REVIEW"
+                ? "bg-[#fff4df] text-[#9a6500]"
+                : "bg-[#eaf8ef] text-[#177245]"
+            }`}
+          >
+            {formatRecommendation(
+              item.recommendation
+            )}
+          </span>
+
+        </div>
+
+      </div>
+
+      <div className="mt-4 rounded-xl bg-[#f5f5f0] px-4 py-3 text-[9px] leading-4 text-black/60">
+
+        <span className="font-bold text-black">
+          Reason:
+        </span>{" "}
+
+        {item.reason ||
+          item.failureReason ||
+          "No recovery reason available."}
+
+      </div>
+
+      {item.recoverable &&
+        item.recommendation !==
+          "REVIEW" &&
+        item.recommendation !==
+          "NO_ACTION" && (
+
+        <div className="mt-4 flex flex-wrap gap-2">
+
+          {hasExecuted ? (
+            <div className="rounded-lg bg-[#eaf8ef] px-4 py-2 text-[9px] font-bold text-[#177245]">
+              {item.recoveryStatus ===
+              "RETRY_SCHEDULED"
+                ? "Retry scheduled"
+                : "Payment link generated"}
+            </div>
+          ) : (
+            <button
+              type="button"
+              disabled={isLoading}
+              onClick={() =>
+                void onExecute(
+                  item.id,
+                  item.recommendation ===
+                    "RETRY"
+                    ? "RETRY"
+                    : "PAYMENT_LINK"
+                )
+              }
+              className="rounded-lg bg-[#111] px-4 py-2 text-[9px] font-bold text-white transition hover:bg-[#5f5cff] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isLoading
+                ? "Processing..."
+                : item.recommendation ===
+                  "RETRY"
+                ? "Schedule Retry"
+                : "Generate Payment Link"}
+            </button>
+          )}
+
+        </div>
+
+      )}
+
+    </div>
+  );
+}
+
+/* =========================================================
+   RECOVERED ROW
+========================================================= */
+
+function RecoveredRow({
+  item,
+}: {
+  item: ActivityItem;
+}) {
+  return (
+    <div className="flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between md:px-6">
+
+      <div className="flex items-center gap-4">
+
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#eaf8ef] text-[#177245]">
+          <Check size={16} />
+        </div>
+
+        <div>
+
+          <div className="text-[8px] font-bold tracking-wider text-black/40">
+            PAYMENT
+          </div>
+
+          <div className="mt-1 text-[11px] font-bold">
+            {item.paymentId}
+          </div>
+
+          <div className="mt-1 text-[9px] text-black/50">
+            {item.customerEmail}
+          </div>
+
+        </div>
+
+      </div>
+
+      <div className="text-left md:text-right">
+
+        <div className="text-[17px] font-black">
+          {formatINR(
+            item.amount
+          )}
+        </div>
+
+        <div className="mt-1 text-[8px] font-bold text-[#177245]">
+          ✓ RECOVERED
+        </div>
+
+      </div>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   METRIC CARD
+========================================================= */
+
+function MetricCard({
+  label,
+  value,
+  change,
+  icon: Icon,
+  negative = false,
+}: {
+  label: string;
+  value: string;
+  change: string;
+  icon: typeof CircleAlert;
+  negative?: boolean;
+}) {
+  return (
+    <div className="rounded-[20px] border border-black/10 bg-white p-5">
+
+      <div className="flex items-center justify-between">
+
+        <span className="text-[9px] font-bold tracking-[0.15em] text-black/50">
+          {label}
+        </span>
+
+        <Icon
+          size={15}
+          className="text-black/50"
+        />
+
+      </div>
+
+      <div className="mt-5 text-[31px] font-black tracking-[-0.05em]">
+        {value}
+      </div>
+
+      <div
+        className={`mt-2 text-[9px] font-bold ${
+          negative
+            ? "text-[#d95d5d]"
+            : "text-[#177245]"
+        }`}
+      >
+        {change}
+      </div>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   PERFORMANCE STAT
+========================================================= */
+
+function PerformanceStat({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-xl bg-[#f5f5f0] p-4">
+
+      <div className="text-[8px] font-bold tracking-wider text-black/40">
+        {label}
+      </div>
+
+      <div className="mt-2 text-[20px] font-black tracking-[-0.04em]">
+        {value}
+      </div>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   RISK ROW
+========================================================= */
+
+function RiskRow({
+  label,
+  amount,
+  percentage,
+}: {
+  label: string;
+  amount: string;
+  percentage: number;
+}) {
+  return (
+    <div>
+
+      <div className="flex items-center justify-between text-[10px]">
+
+        <span className="text-white/45">
+          {label}
+        </span>
+
+        <span className="font-bold">
+          {amount}
+        </span>
+
+      </div>
+
+      <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10">
+
+        <div
+          className="h-full rounded-full bg-[#9693ff]"
+          style={{
+            width: `${Math.max(
+              0,
+              Math.min(
+                percentage,
+                100
+              )
+            )}%`,
+          }}
+        />
+
+      </div>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   POLICY ROW
+========================================================= */
+
+function PolicyRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center justify-between border-b border-white/10 py-4">
+
+      <span className="text-[10px] text-white/40">
+        {label}
+      </span>
+
+      <span className="text-[11px] font-bold">
+        {value}
+      </span>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function formatINR(
+  amount: number
+) {
+  const safeAmount =
+    Number.isFinite(
+      amount
+    )
+      ? amount
+      : 0;
+
+  return `₹${safeAmount.toLocaleString(
+    "en-IN"
+  )}`;
+}
+
+function formatRecommendation(
+  value: Recommendation
+) {
+  switch (value) {
+    case "RETRY":
+      return "Retry Recommended";
+
+    case "PAYMENT_LINK":
+      return "Payment Link";
+
+    case "REVIEW":
+      return "Review Required";
+
+    case "NO_ACTION":
+      return "No Action";
+
+    default:
+      return "No Action";
+  }
+}
+
+/* =========================================================
+   FAILURE BREAKDOWN
+========================================================= */
+
+function getFailureBreakdown(
+  cases: RecoveryCase[]
+) {
+  const map =
+    new Map<string, number>();
+
+  cases.forEach((item) => {
+    const reason =
+      item.failureReason ||
+      "Other";
+
+    map.set(
+      reason,
+      (map.get(reason) || 0) +
+        (Number(item.amount) || 0)
+    );
+  });
+
+  const total =
+    cases.reduce(
+      (sum, item) =>
+        sum +
+        (Number(item.amount) || 0),
+      0
+    );
+
+  return Array.from(
+    map.entries()
+  )
+    .map(
+      ([label, amount]) => ({
+        label,
+        amount,
+        percentage:
+          total > 0
+            ? Math.round(
+                (amount / total) *
+                  100
+              )
+            : 0,
+      })
+    )
+    .sort(
+      (a, b) =>
+        b.amount -
+        a.amount
+    );
+}
+
+/* =========================================================
+   RECOVERED ACTIVITY
+========================================================= */
+
+function getRecoveredActivity(
+  activity: ActivityItem[]
+) {
+  return activity.filter(
+    (item) => {
+      const text = `
+        ${item.type}
+        ${item.action}
+        ${item.message}
+      `.toLowerCase();
+
+      return (
+        text.includes(
+          "recovered"
+        ) ||
+        text.includes(
+          "recovery_success"
+        ) ||
+        text.includes(
+          "payment recovered"
+        ) ||
+        text.includes(
+          "successfully"
+        )
+      );
+    }
   );
 }

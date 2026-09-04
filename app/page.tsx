@@ -8,8 +8,6 @@ import {
   CircleAlert,
   Clock3,
   CreditCard,
-
-  
   Search,
   ShieldCheck,
   Sparkles,
@@ -19,7 +17,7 @@ import {
   Zap,
 } from "lucide-react";
 import { motion, useScroll, useTransform } from "framer-motion";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 
 const fadeUp = {
   initial: {
@@ -148,6 +146,9 @@ const cases = [
 export default function Home() {
   const heroRef = useRef<HTMLDivElement>(null);
 
+  const [loadingDemo, setLoadingDemo] = useState(false);
+  const [demoMessage, setDemoMessage] = useState("");
+
   const { scrollYProgress } = useScroll({
     target: heroRef,
     offset: ["start start", "end start"],
@@ -155,6 +156,76 @@ export default function Home() {
 
   const heroY = useTransform(scrollYProgress, [0, 1], [0, 120]);
   const heroOpacity = useTransform(scrollYProgress, [0, 0.8], [1, 0]);
+
+  /*
+   * CREATE DEMO TRANSACTIONS
+   *
+   * These are stored in the same database through
+   * the existing POST /api/transactions endpoint.
+   */
+  async function createDemoTransactions() {
+    if (loadingDemo) return;
+
+    setLoadingDemo(true);
+    setDemoMessage("");
+
+    const transactions = [
+      {
+        customerEmail: "demo1@recovr.com",
+        amount: 500,
+        currency: "INR",
+        failureReason: "INSUFFICIENT_FUNDS",
+      },
+      {
+        customerEmail: "demo2@recovr.com",
+        amount: 2000,
+        currency: "INR",
+        failureReason: "CARD_DECLINED",
+      },
+      {
+        customerEmail: "demo3@recovr.com",
+        amount: 5000,
+        currency: "INR",
+        failureReason: "NETWORK_ERROR",
+      },
+      {
+        customerEmail: "demo4@recovr.com",
+        amount: 1500,
+        currency: "INR",
+        failureReason: "PAYMENT_TIMEOUT",
+      },
+    ];
+
+    try {
+      for (const transaction of transactions) {
+        const response = await fetch("/api/transactions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(transaction),
+        });
+
+        if (!response.ok) {
+          throw new Error(
+            `Failed to create ₹${transaction.amount} transaction`
+          );
+        }
+      }
+
+      setDemoMessage(
+        "4 demo transactions created successfully."
+      );
+    } catch (error) {
+      console.error("Demo transaction creation failed:", error);
+
+      setDemoMessage(
+        "Unable to create demo transactions. Please try again."
+      );
+    } finally {
+      setLoadingDemo(false);
+    }
+  }
 
   return (
     <main className="min-h-screen overflow-hidden bg-[#f5f5f0] text-[#111]">
@@ -170,46 +241,21 @@ export default function Home() {
           </a>
 
           <div className="hidden items-center gap-8 text-[10px] font-bold md:flex">
-            <a
-              href="#platform"
-              className="text-black transition hover:text-black"
-            >
-              Platform
-            </a>
+            <a href="#platform">Platform</a>
 
-            <a
-              href="#recovery"
-              className="text-black transition hover:text-black"
-            >
-              How It Works
-            </a>
+            <a href="#recovery">How It Works</a>
 
-            <a
-              href="#intelligence"
-              className="text-black transition hover:text-black"
-            >
-              Intelligence
-            </a>
+            <a href="#intelligence">Intelligence</a>
 
-            <a
-              href="/dashboard"
-              className="text-black transition hover:text-black"
-            >
-              Dashboard
-            </a>
+            <a href="/dashboard">Dashboard</a>
 
-            <a
-              href="#results"
-              className="text-black transition hover:text-black"
-            >
-              Results
-            </a>
+            <a href="#results">Results</a>
           </div>
 
           <div className="flex items-center gap-3">
             <a
               href="/dashboard"
-              className="hidden text-[10px] font-bold text-black transition hover:text-black sm:block"
+              className="hidden text-[10px] font-bold sm:block"
             >
               Sign In
             </a>
@@ -246,6 +292,7 @@ export default function Home() {
               <motion.div {...fadeUp}>
                 <div className="mb-7 flex items-center gap-3">
                   <span className="h-px w-8 bg-[#5f5cff]" />
+
                   <span className="text-[9px] font-black tracking-[0.22em] text-[#5f5cff]">
                     AI REVENUE RECOVERY
                   </span>
@@ -275,7 +322,7 @@ export default function Home() {
                   delay: 0.18,
                   ease: "easeOut",
                 }}
-                className="mt-8 max-w-[570px] text-[13px] leading-6 text-black md:text-[14px]"
+                className="mt-8 max-w-[570px] text-[13px] leading-6 md:text-[14px]"
               >
                 Recovr detects revenue slipping through failed payments,
                 abandoned checkouts and recurring failures — then determines
@@ -283,6 +330,7 @@ export default function Home() {
                 and measures what comes back.
               </motion.p>
 
+              {/* BUTTONS */}
               <motion.div
                 {...fadeUp}
                 transition={{
@@ -297,6 +345,7 @@ export default function Home() {
                   className="group flex items-center gap-3 rounded-full bg-[#111] px-6 py-3.5 text-[11px] font-bold text-white transition hover:bg-[#5f5cff]"
                 >
                   Enter Recovery Command Center
+
                   <ArrowRight
                     size={14}
                     className="transition-transform group-hover:translate-x-1"
@@ -312,14 +361,63 @@ export default function Home() {
                 </a>
               </motion.div>
 
+              {/* DEMO TRANSACTION BUTTON */}
+              <motion.div
+                {...fadeUp}
+                transition={{
+                  duration: 0.65,
+                  delay: 0.32,
+                  ease: "easeOut",
+                }}
+                className="mt-4"
+              >
+                <button
+                  onClick={createDemoTransactions}
+                  disabled={loadingDemo}
+                  className="group inline-flex items-center gap-3 rounded-full border border-[#5f5cff]/30 bg-[#5f5cff]/5 px-6 py-3.5 text-[11px] font-black text-[#5f5cff] transition hover:bg-[#5f5cff] hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {loadingDemo ? (
+                    <>
+                      <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                      Creating Demo Transactions...
+                    </>
+                  ) : (
+                    <>
+                      <Zap size={14} />
+                      Load Demo Transactions
+                      <ArrowRight
+                        size={14}
+                        className="transition-transform group-hover:translate-x-1"
+                      />
+                    </>
+                  )}
+                </button>
+
+                {demoMessage && (
+                  <div
+                    className={`mt-3 text-[9px] font-bold ${
+                      demoMessage.includes("successfully")
+                        ? "text-[#177245]"
+                        : "text-red-600"
+                    }`}
+                  >
+                    {demoMessage}
+                  </div>
+                )}
+
+                <p className="mt-2 text-[8px] text-black/40">
+                  Creates 4 failed demo payments in the RECOVR database.
+                </p>
+              </motion.div>
+
               <motion.div
                 {...fadeUp}
                 transition={{
                   duration: 0.6,
-                  delay: 0.34,
+                  delay: 0.4,
                   ease: "easeOut",
                 }}
-                className="mt-10 flex items-center gap-6 text-[9px] font-bold text-black"
+                className="mt-8 flex items-center gap-6 text-[9px] font-bold"
               >
                 <div className="flex items-center gap-2">
                   <Check size={12} className="text-[#5f5cff]" />
@@ -340,8 +438,16 @@ export default function Home() {
 
             {/* HERO VISUAL */}
             <motion.div
-              initial={{ opacity: 0, scale: 0.96, y: 30 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
+              initial={{
+                opacity: 0,
+                scale: 0.96,
+                y: 30,
+              }}
+              animate={{
+                opacity: 1,
+                scale: 1,
+                y: 0,
+              }}
               transition={{
                 duration: 0.8,
                 delay: 0.25,
@@ -349,7 +455,6 @@ export default function Home() {
               }}
               className="relative mx-auto w-full max-w-[620px]"
             >
-              {/* floating labels */}
               <FloatingLabel
                 className="left-[-15px] top-[14%] hidden sm:flex"
                 icon={<CircleAlert size={12} />}
@@ -375,13 +480,13 @@ export default function Home() {
                 success
               />
 
-              {/* main case */}
               <div className="relative rounded-[30px] border border-black/10 bg-white p-5 shadow-[0_30px_100px_rgba(0,0,0,0.08)] sm:p-7">
                 <div className="flex items-center justify-between border-b border-black/8 pb-5">
                   <div>
-                    <div className="text-[8px] font-black tracking-[0.2em] text-black">
+                    <div className="text-[8px] font-black tracking-[0.2em]">
                       RECOVERY CASE
                     </div>
+
                     <div className="mt-1 text-[11px] font-bold">
                       RCV-2847
                     </div>
@@ -398,7 +503,7 @@ export default function Home() {
                     ₹12,499
                   </div>
 
-                  <div className="mt-1 text-[9px] font-bold tracking-[0.15em] text-black">
+                  <div className="mt-1 text-[9px] font-bold tracking-[0.15em]">
                     REVENUE AT RISK
                   </div>
                 </div>
@@ -471,7 +576,7 @@ export default function Home() {
         </motion.div>
 
         <div className="absolute bottom-7 left-1/2 hidden -translate-x-1/2 flex-col items-center gap-3 md:flex">
-          <span className="text-[8px] font-bold tracking-[0.2em] text-black">
+          <span className="text-[8px] font-bold tracking-[0.2em]">
             SCROLL TO EXPLORE
           </span>
 
@@ -490,7 +595,10 @@ export default function Home() {
       </section>
 
       {/* CHALLENGE */}
-      <section id="platform" className="border-t border-black/10">
+      <section
+        id="platform"
+        className="border-t border-black/10"
+      >
         <div className="mx-auto max-w-[1500px] px-5 py-24 md:px-8 md:py-32">
           <motion.div {...fadeUp}>
             <div className="text-[9px] font-black tracking-[0.2em] text-[#5f5cff]">
@@ -503,7 +611,7 @@ export default function Home() {
               disappear in one place.
             </h2>
 
-            <p className="mt-7 max-w-[600px] text-[13px] leading-6 text-black">
+            <p className="mt-7 max-w-[600px] text-[13px] leading-6">
               Payment failures, abandoned checkouts, recurring failures and
               sudden degradation all create different forms of revenue
               leakage. Recovr brings those signals into one recovery system.
@@ -523,7 +631,7 @@ export default function Home() {
                 className="group relative min-h-[330px] overflow-hidden rounded-[24px] border border-black/10 bg-white p-6 transition hover:-translate-y-1 hover:shadow-xl"
               >
                 <div className="flex items-start justify-between">
-                  <span className="text-[9px] font-black tracking-[0.18em] text-black">
+                  <span className="text-[9px] font-black tracking-[0.18em]">
                     {item.number}
                   </span>
 
@@ -537,7 +645,7 @@ export default function Home() {
                     {item.title}
                   </h3>
 
-                  <p className="mt-3 text-[10px] leading-5 text-black">
+                  <p className="mt-3 text-[10px] leading-5">
                     {item.description}
                   </p>
                 </div>
@@ -549,14 +657,14 @@ export default function Home() {
                         {item.metric}
                       </div>
 
-                      <div className="mt-1 text-[7px] font-bold tracking-[0.15em] text-black">
+                      <div className="mt-1 text-[7px] font-bold tracking-[0.15em]">
                         {item.metricLabel}
                       </div>
                     </div>
 
                     <ArrowDownRight
                       size={15}
-                      className="text-black transition group-hover:translate-x-1 group-hover:translate-y-1 group-hover:text-[#5f5cff]"
+                      className="transition group-hover:translate-x-1 group-hover:translate-y-1 group-hover:text-[#5f5cff]"
                     />
                   </div>
                 </div>
@@ -567,7 +675,10 @@ export default function Home() {
       </section>
 
       {/* TRANSFORMATION */}
-      <section id="recovery" className="bg-[#111] text-white">
+      <section
+        id="recovery"
+        className="bg-[#111] text-white"
+      >
         <div className="mx-auto max-w-[1500px] px-5 py-24 md:px-8 md:py-32">
           <motion.div {...fadeUp}>
             <div className="text-[9px] font-black tracking-[0.2em] text-[#9693ff]">
@@ -626,7 +737,7 @@ export default function Home() {
               {...fadeUp}
               className="relative rounded-[28px] bg-[#f5f5f0] p-7 text-[#111] md:p-9"
             >
-              <div className="text-[8px] font-bold tracking-[0.18em] text-black">
+              <div className="text-[8px] font-bold tracking-[0.18em]">
                 RECOVR DECISION ENGINE
               </div>
 
@@ -645,7 +756,7 @@ export default function Home() {
                         {step.title}
                       </div>
 
-                      <p className="mt-1 max-w-[480px] text-[9px] leading-5 text-black">
+                      <p className="mt-1 max-w-[480px] text-[9px] leading-5">
                         {step.text}
                       </p>
                     </div>
@@ -688,7 +799,7 @@ export default function Home() {
             >
               <div className="flex items-center justify-between">
                 <div>
-                  <div className="text-[8px] font-black tracking-[0.18em] text-black">
+                  <div className="text-[8px] font-black tracking-[0.18em]">
                     RECOVERY INTELLIGENCE
                   </div>
 
@@ -697,16 +808,28 @@ export default function Home() {
                   </div>
                 </div>
 
-                <Sparkles size={18} className="text-[#5f5cff]" />
+                <Sparkles
+                  size={18}
+                  className="text-[#5f5cff]"
+                />
               </div>
 
               <div className="mt-8 grid grid-cols-2 gap-2">
-                <InfoBox label="CUSTOMER" value="Ananya Sharma" />
-                <InfoBox label="AMOUNT" value="₹12,499" />
+                <InfoBox
+                  label="CUSTOMER"
+                  value="Ananya Sharma"
+                />
+
+                <InfoBox
+                  label="AMOUNT"
+                  value="₹12,499"
+                />
+
                 <InfoBox
                   label="FAILURE"
                   value="Insufficient funds"
                 />
+
                 <InfoBox
                   label="PREVIOUS RECOVERY"
                   value="1 successful retry"
@@ -738,7 +861,7 @@ export default function Home() {
               {...fadeUp}
               className="rounded-[28px] border border-black/10 bg-white p-7"
             >
-              <div className="text-[8px] font-black tracking-[0.18em] text-black">
+              <div className="text-[8px] font-black tracking-[0.18em]">
                 EXPLAINABILITY
               </div>
 
@@ -784,7 +907,7 @@ export default function Home() {
                   POLICY CHECK PASSED
                 </div>
 
-                <p className="mt-2 text-[9px] leading-5 text-black">
+                <p className="mt-2 text-[9px] leading-5">
                   Recommended action remains within the configured recovery
                   boundaries.
                 </p>
@@ -805,7 +928,9 @@ export default function Home() {
             <h2 className="mt-5 max-w-[850px] text-[48px] font-black leading-[0.94] tracking-[-0.065em] md:text-[76px]">
               Every at-risk transaction.
               <br />
-              <span className="text-[#5f5cff]">One place to act.</span>
+              <span className="text-[#5f5cff]">
+                One place to act.
+              </span>
             </h2>
           </motion.div>
 
@@ -815,7 +940,7 @@ export default function Home() {
           >
             <div className="flex flex-col gap-4 border-b border-black/8 p-5 md:flex-row md:items-center md:justify-between md:p-7">
               <div>
-                <div className="text-[8px] font-bold tracking-[0.18em] text-black">
+                <div className="text-[8px] font-bold tracking-[0.18em]">
                   ACTIVE RECOVERY CASES
                 </div>
 
@@ -825,14 +950,15 @@ export default function Home() {
               </div>
 
               <div className="flex items-center gap-2 rounded-xl border border-black/10 px-3 py-2 md:w-[280px]">
-                <Search size={13} className="text-black" />
-                <span className="text-[9px] text-black">
+                <Search size={13} />
+
+                <span className="text-[9px]">
                   Search transaction ID, customer...
                 </span>
               </div>
             </div>
 
-            <div className="hidden grid-cols-[1fr_1fr_1fr_0.7fr_1fr] gap-4 border-b border-black/7 px-7 py-3 text-[8px] font-bold tracking-[0.16em] text-black md:grid">
+            <div className="hidden grid-cols-[1fr_1fr_1fr_0.7fr_1fr] gap-4 border-b border-black/7 px-7 py-3 text-[8px] font-bold tracking-[0.16em] md:grid">
               <span>CASE</span>
               <span>TYPE</span>
               <span>AMOUNT</span>
@@ -846,7 +972,7 @@ export default function Home() {
                 className="grid gap-4 border-b border-black/7 p-5 last:border-0 md:grid-cols-[1fr_1fr_1fr_0.7fr_1fr] md:items-center md:px-7"
               >
                 <div>
-                  <div className="text-[8px] text-black md:hidden">
+                  <div className="text-[8px] md:hidden">
                     CASE
                   </div>
 
@@ -856,7 +982,7 @@ export default function Home() {
                 </div>
 
                 <div>
-                  <div className="text-[8px] text-black md:hidden">
+                  <div className="text-[8px] md:hidden">
                     TYPE
                   </div>
 
@@ -866,7 +992,7 @@ export default function Home() {
                 </div>
 
                 <div>
-                  <div className="text-[8px] text-black md:hidden">
+                  <div className="text-[8px] md:hidden">
                     AMOUNT
                   </div>
 
@@ -876,7 +1002,7 @@ export default function Home() {
                 </div>
 
                 <div>
-                  <div className="text-[8px] text-black md:hidden">
+                  <div className="text-[8px] md:hidden">
                     RECOVERY
                   </div>
 
@@ -886,7 +1012,7 @@ export default function Home() {
                 </div>
 
                 <div>
-                  <div className="text-[8px] text-black md:hidden">
+                  <div className="text-[8px] md:hidden">
                     ACTION
                   </div>
 
@@ -1010,7 +1136,9 @@ export default function Home() {
               <br />
               lost revenue.
               <br />
-              <span className="text-[#5f5cff]">Show what came back.</span>
+              <span className="text-[#5f5cff]">
+                Show what came back.
+              </span>
             </h2>
           </motion.div>
 
@@ -1082,9 +1210,10 @@ export default function Home() {
 
       {/* FOOTER */}
       <footer className="border-t border-black/10">
-        <div className="mx-auto flex max-w-[1500px] flex-col gap-4 px-5 py-7 text-[9px] text-black md:flex-row md:items-center md:justify-between md:px-8">
+        <div className="mx-auto flex max-w-[1500px] flex-col gap-4 px-5 py-7 text-[9px] md:flex-row md:items-center md:justify-between md:px-8">
           <div className="font-black tracking-[-0.04em]">
-            RECO<span className="text-[#5f5cff]">VR</span>
+            RECO
+            <span className="text-[#5f5cff]">VR</span>
           </div>
 
           <div>AI Revenue Recovery Control Tower</div>
@@ -1146,7 +1275,7 @@ function CaseMini({
 }) {
   return (
     <div className="rounded-2xl bg-[#f5f5f0] p-4">
-      <div className="flex items-center gap-2 text-[8px] font-bold tracking-[0.12em] text-black">
+      <div className="flex items-center gap-2 text-[8px] font-bold tracking-[0.12em]">
         {icon}
         {label}
       </div>
@@ -1185,7 +1314,9 @@ function DarkSignal({
 
       <span
         className={`text-[10px] font-black ${
-          purple ? "text-[#9693ff]" : "text-white"
+          purple
+            ? "text-[#9693ff]"
+            : "text-white"
         }`}
       >
         {value}
@@ -1203,7 +1334,7 @@ function InfoBox({
 }) {
   return (
     <div className="rounded-2xl bg-[#f5f5f0] p-4">
-      <div className="text-[7px] font-bold tracking-[0.13em] text-black">
+      <div className="text-[7px] font-bold tracking-[0.13em]">
         {label}
       </div>
 
@@ -1225,13 +1356,16 @@ function ExplainRow({
 }) {
   return (
     <div className="flex items-center justify-between border-b border-black/7 py-4">
-      <span className="text-[9px] text-black">
+      <span className="text-[9px]">
         {label}
       </span>
 
       <span className="flex items-center gap-2 text-[9px] font-bold">
         {positive && (
-          <Check size={12} className="text-[#177245]" />
+          <Check
+            size={12}
+            className="text-[#177245]"
+          />
         )}
 
         {value}
@@ -1252,7 +1386,9 @@ function PolicyDark({
   return (
     <div className="flex items-center justify-between border-b border-white/8 py-4">
       <div className="flex items-center gap-3">
-        <span className="text-white/25">{icon}</span>
+        <span className="text-white/25">
+          {icon}
+        </span>
 
         <span className="text-[9px] text-white/40">
           {label}
@@ -1288,7 +1424,9 @@ function ResultCard({
     >
       <div
         className={`text-[45px] font-black tracking-[-0.07em] ${
-          purple ? "text-[#5f5cff]" : ""
+          purple
+            ? "text-[#5f5cff]"
+            : ""
         }`}
       >
         {value}
@@ -1298,7 +1436,7 @@ function ResultCard({
         {label}
       </div>
 
-      <p className="mt-3 text-[10px] leading-5 text-black">
+      <p className="mt-3 text-[10px] leading-5">
         {text}
       </p>
     </motion.div>

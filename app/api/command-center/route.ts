@@ -7,13 +7,13 @@ export async function GET() {
   try {
     /* =====================================================
        SYSTEM HEALTH
-       ===================================================== */
+    ===================================================== */
 
     const baseline = await calculateBaseline();
 
     /* =====================================================
        INCIDENTS
-       ===================================================== */
+    ===================================================== */
 
     const incidents = await prisma.incident.findMany({
       orderBy: {
@@ -32,53 +32,92 @@ export async function GET() {
 
     /* =====================================================
        TRANSACTIONS
-       ===================================================== */
+    ===================================================== */
 
-    const transactions = await prisma.transaction.findMany({
-      include: {
-        recoveryEvents: {
-          orderBy: {
-            createdAt: "desc",
+    const transactions =
+      await prisma.transaction.findMany({
+        include: {
+          recoveryEvents: {
+            orderBy: {
+              createdAt: "desc",
+            },
           },
         },
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
 
     /* =====================================================
        RECOVERY QUEUE
-       ===================================================== */
+       Only ACTIVE / UNRECOVERED transactions
+    ===================================================== */
 
     const recoveryQueue = transactions
       .map((transaction) => {
-        const decision = evaluateRecovery(transaction);
+        const decision =
+          evaluateRecovery(transaction);
 
         return {
           id: transaction.id,
-          paymentId: transaction.paymentId,
-          customerEmail: transaction.customerEmail,
-          amount: transaction.amount,
-          currency: transaction.currency,
 
-          status: transaction.status,
-          failureReason: transaction.failureReason,
+          paymentId:
+            transaction.paymentId,
 
-          recoverable: transaction.recoverable,
-          recovered: transaction.recovered,
+          customerEmail:
+            transaction.customerEmail,
 
-          recoveryStatus: transaction.recoveryStatus,
-          recoveryAction: transaction.recoveryAction,
+          amount:
+            transaction.amount,
 
-          recommendation: decision.recommendation,
-          confidence: decision.confidence,
-          priority: decision.priority,
-          reason: decision.reason,
-          shouldRecover: decision.shouldRecover,
+          currency:
+            transaction.currency,
 
-          createdAt: transaction.createdAt,
-          updatedAt: transaction.updatedAt,
+          status:
+            transaction.status,
+
+          failureReason:
+            transaction.failureReason,
+
+          recoverable:
+            transaction.recoverable,
+
+          recovered:
+            transaction.recovered,
+
+          recoveredAmount:
+            transaction.recoveredAmount,
+
+          recoveredAt:
+            transaction.recoveredAt,
+
+          recoveryStatus:
+            transaction.recoveryStatus,
+
+          recoveryAction:
+            transaction.recoveryAction,
+
+          recommendation:
+            decision.recommendation,
+
+          confidence:
+            decision.confidence,
+
+          priority:
+            decision.priority,
+
+          reason:
+            decision.reason,
+
+          shouldRecover:
+            decision.shouldRecover,
+
+          createdAt:
+            transaction.createdAt,
+
+          updatedAt:
+            transaction.updatedAt,
         };
       })
       .filter(
@@ -101,31 +140,112 @@ export async function GET() {
 
     /* =====================================================
        RECOVERED TRANSACTIONS
-       ===================================================== */
+
+       IMPORTANT:
+       These are kept separately from the recovery queue.
+    ===================================================== */
 
     const recoveredTransactions =
-      transactions.filter(
-        (transaction) => transaction.recovered
-      );
+      transactions
+        .filter(
+          (transaction) =>
+            transaction.recovered === true
+        )
+        .map((transaction) => {
+          const decision =
+            evaluateRecovery(transaction);
+
+          return {
+            id:
+              transaction.id,
+
+            paymentId:
+              transaction.paymentId,
+
+            customerEmail:
+              transaction.customerEmail,
+
+            amount:
+              transaction.amount,
+
+            currency:
+              transaction.currency,
+
+            status:
+              transaction.status,
+
+            failureReason:
+              transaction.failureReason,
+
+            recoverable:
+              transaction.recoverable,
+
+            recovered:
+              transaction.recovered,
+
+            recoveredAmount:
+              transaction.recoveredAmount,
+
+            recoveredAt:
+              transaction.recoveredAt,
+
+            recoveryStatus:
+              transaction.recoveryStatus,
+
+            recoveryAction:
+              transaction.recoveryAction,
+
+            recommendation:
+              decision.recommendation,
+
+            confidence:
+              decision.confidence,
+
+            priority:
+              decision.priority,
+
+            reason:
+              decision.reason,
+
+            createdAt:
+              transaction.createdAt,
+
+            updatedAt:
+              transaction.updatedAt,
+          };
+        });
+
+    /* =====================================================
+       RECOVERED REVENUE
+    ===================================================== */
 
     const recoveredRevenue =
       recoveredTransactions.reduce(
         (total, transaction) =>
           total +
-          (transaction.recoveredAmount ?? 0),
+          Number(
+            transaction.recoveredAmount ?? 0
+          ),
         0
       );
 
     /* =====================================================
-       REVENUE METRICS
-       ===================================================== */
+       REVENUE AT RISK
+    ===================================================== */
 
     const revenueAtRisk =
       recoveryQueue.reduce(
         (total, transaction) =>
-          total + transaction.amount,
+          total +
+          Number(transaction.amount ?? 0),
         0
       );
+
+    /* =====================================================
+       RECOVERABLE REVENUE
+
+       Includes recovered + currently recoverable.
+    ===================================================== */
 
     const recoverableRevenue =
       transactions
@@ -135,9 +255,14 @@ export async function GET() {
         )
         .reduce(
           (total, transaction) =>
-            total + transaction.amount,
+            total +
+            Number(transaction.amount ?? 0),
           0
         );
+
+    /* =====================================================
+       RECOVERY RATE
+    ===================================================== */
 
     const recoveryRate =
       recoverableRevenue > 0
@@ -150,52 +275,75 @@ export async function GET() {
 
     /* =====================================================
        ACTIVITY / AUDIT TIMELINE
-       ===================================================== */
+    ===================================================== */
 
-    const activity = transactions
-      .flatMap((transaction) =>
-        transaction.recoveryEvents.map((event) => ({
-          id: event.id,
+    const activity =
+      transactions
+        .flatMap((transaction) =>
+          transaction.recoveryEvents.map(
+            (event) => ({
+              id:
+                event.id,
 
-          transactionId:
-            transaction.id,
+              transactionId:
+                transaction.id,
 
-          paymentId:
-            transaction.paymentId,
+              paymentId:
+                transaction.paymentId,
 
-          customerEmail:
-            transaction.customerEmail,
+              customerEmail:
+                transaction.customerEmail,
 
-          type: event.eventType,
-          action: event.action,
-          message: event.message,
+              type:
+                event.eventType,
 
-          amount: transaction.amount,
+              action:
+                event.action,
 
-          createdAt: event.createdAt,
-        }))
-      )
-      .sort(
-        (a, b) =>
-          new Date(b.createdAt).getTime() -
-          new Date(a.createdAt).getTime()
-      )
-      .slice(0, 20);
+              message:
+                event.message,
+
+              amount:
+                transaction.amount,
+
+              createdAt:
+                event.createdAt,
+            })
+          )
+        )
+        .sort(
+          (a, b) =>
+            new Date(
+              b.createdAt
+            ).getTime() -
+            new Date(
+              a.createdAt
+            ).getTime()
+        )
+        .slice(0, 20);
 
     /* =====================================================
        OVERVIEW
-       ===================================================== */
+    ===================================================== */
 
     const overview = {
-      activeIncidents: activeIncidents.length,
+      totalTransactions:
+        transactions.length,
 
-      totalIncidents: incidents.length,
+      activeIncidents:
+        activeIncidents.length,
+
+      totalIncidents:
+        incidents.length,
 
       revenueAtRisk,
 
       recoverableRevenue,
 
       recoveredRevenue,
+
+      recoveredAmount:
+        recoveredRevenue,
 
       recoveredCases:
         recoveredTransactions.length,
@@ -205,17 +353,19 @@ export async function GET() {
 
       recoveryRate,
 
-      currency: "INR",
+      currency:
+        "INR",
     };
 
     /* =====================================================
        RESPONSE
-       ===================================================== */
+    ===================================================== */
 
     return NextResponse.json({
       success: true,
 
-      generatedAt: new Date(),
+      generatedAt:
+        new Date(),
 
       overview,
 
@@ -252,28 +402,48 @@ export async function GET() {
       },
 
       incidents: {
-        total: incidents.length,
+        total:
+          incidents.length,
 
-        active: activeIncidents.length,
+        active:
+          activeIncidents.length,
 
-        items: incidents,
+        items:
+          incidents,
       },
 
       recoveryQueue: {
-        total: recoveryQueue.length,
+        total:
+          recoveryQueue.length,
 
         actionable:
           recoveryQueue.filter(
-            (item) => item.shouldRecover
+            (item) =>
+              item.shouldRecover
           ).length,
 
-        items: recoveryQueue,
+        items:
+          recoveryQueue,
+      },
+
+      /* ===================================================
+         THIS IS THE IMPORTANT NEW SECTION
+      =================================================== */
+
+      recoveredTransactions: {
+        total:
+          recoveredTransactions.length,
+
+        items:
+          recoveredTransactions,
       },
 
       activity: {
-        total: activity.length,
+        total:
+          activity.length,
 
-        items: activity,
+        items:
+          activity,
       },
     });
   } catch (error) {

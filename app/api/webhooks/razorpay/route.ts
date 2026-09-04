@@ -1,365 +1,542 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import crypto from "crypto";
-import { prisma } from "@/lib/prisma";
+import { prisma } from "@/lib/db/prisma";
 
-function verifyRazorpaySignature(
+type RazorpayWebhookPayload = {
+  event?: string;
+  payload?: {
+    payment?: {
+      entity?: {
+        id?: string;
+        order_id?: string | null;
+        amount?: number;
+        currency?: string;
+        status?: string;
+        email?: string;
+        contact?: string;
+        notes?: Record<string, string>;
+      };
+    };
+    order?: {
+      entity?: {
+        id?: string;
+        amount?: number;
+        currency?: string;
+        status?: string;
+        notes?: Record<string, string>;
+      };
+    };
+    payment_link?: {
+      entity?: {
+        id?: string;
+        short_url?: string;
+        status?: string;
+        amount?: number;
+        currency?: string;
+        reference_id?: string;
+      };
+    };
+  };
+};
+
+function getWebhookSecret() {
+  return (
+    process.env.RAZORPAY_WEBHOOK_SECRET ||
+    process.env.RAZORPAY_WEBHOOK_SECRET_KEY ||
+    ""
+  );
+}
+
+function verifySignature(
   rawBody: string,
   signature: string,
   secret: string
 ) {
+  if (!signature || !secret) {
+    return false;
+  }
+
   const expected = crypto
     .createHmac("sha256", secret)
     .update(rawBody)
     .digest("hex");
 
-  return crypto.timingSafeEqual(
-    Buffer.from(expected),
-    Buffer.from(signature)
-  );
-}
-
-function getFailureReason(payment: any) {
-  return (
-    payment.error_description ||
-    payment.error_reason ||
-    payment.error_code ||
-    "Unknown payment failure"
-  );
-}
-
-export async function POST(req: NextRequest) {
   try {
-    const rawBody = await req.text();
+    return crypto.timingSafeEqual(
+      Buffer.from(expected),
+      Buffer.from(signature)
+    );
+  } catch {
+    return false;
+  }
+}
 
-    const signature = req.headers.get("x-razorpay-signature");
-    const eventId =
-      req.headers.get("x-razorpay-event-id") ||
-      req.headers.get("x-razorpay-request-id");
+function extractRecovrTransactionId(
+  payload: RazorpayWebhookPayload
+) {
+  const payment =
+    payload.payload?.payment?.entity;
 
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  const paymentLink =
+    payload.payload?.payment_link?.entity;
 
-    if (!secret) {
-      console.error("RAZORPAY_WEBHOOK_SECRET is missing");
+  const paymentNotes =
+    payment?.notes || {};
 
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Webhook secret is not configured",
+  const paymentLinkReference =
+    paymentLink?.reference_id || "";
+
+  const noteTransactionId =
+    paymentNotes.recovrTransactionId ||
+    paymentNotes.transactionId ||
+    "";
+
+  if (noteTransactionId) {
+    return noteTransactionId;
+  }
+
+  if (
+    paymentLinkReference.startsWith(
+      "recovr_"
+    )
+  ) {
+    return paymentLinkReference.replace(
+      "recovr_",
+      ""
+    );
+  }
+
+  return null;
+}
+
+async function markTransactionRecovered(
+  transactionId: string,
+  paymentId: string | null,
+  razorpayOrderId: string | null,
+  razorpayPaymentLinkId: string | null
+) {
+  const transaction =
+    await prisma.transaction.findUnique({
+      where: {
+        id: transactionId,
+      },
+      include: {
+        recoveryEvents: {
+          orderBy: {
+            createdAt: "desc",
+          },
+          take: 20,
         },
-        { status: 500 }
-      );
+      },
+    });
+
+  if (!transaction) {
+    return null;
+  }
+
+  if (transaction.recovered) {
+    return transaction;
+  }
+
+  const updated =
+    await prisma.transaction.update({
+      where: {
+        id: transaction.id,
+      },
+      data: {
+        recovered: true,
+
+        recoveryStatus:
+          "RECOVERED",
+
+        recoveryAction:
+          "MARK_RECOVERED",
+
+        recommendation:
+          "NO_ACTION",
+
+        recoveredAt:
+          new Date(),
+
+        razorpayPaymentId:
+          paymentId || undefined,
+
+        razorpayOrderId:
+          razorpayOrderId || undefined,
+
+        razorpayPaymentLinkId:
+          razorpayPaymentLinkId ||
+          undefined,
+
+        reason:
+          "Razorpay confirmed successful payment for a RECOVR recovery attempt.",
+      },
+      include: {
+        recoveryEvents: {
+          orderBy: {
+            createdAt: "desc",
+          },
+          take: 20,
+        },
+      },
+    });
+
+  await prisma.recoveryEvent.create({
+    data: {
+      transactionId:
+        transaction.id,
+
+      eventType:
+        "PAYMENT_RECOVERED",
+
+      action:
+        "MARK_RECOVERED",
+
+      message:
+        `Razorpay confirmed successful recovery${
+          paymentId
+            ? ` for payment ${paymentId}`
+            : ""
+        }.`,
+    },
+  });
+
+  return updated;
+}
+
+export async function POST(
+  request: Request
+) {
+  try {
+    const rawBody =
+      await request.text();
+
+    const signature =
+      request.headers.get(
+        "x-razorpay-signature"
+      ) || "";
+
+    const webhookSecret =
+      getWebhookSecret();
+
+    /*
+     * Signature verification is mandatory
+     * when a webhook secret has been configured.
+     */
+    if (webhookSecret) {
+      const valid =
+        verifySignature(
+          rawBody,
+          signature,
+          webhookSecret
+        );
+
+      if (!valid) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Invalid Razorpay webhook signature.",
+          },
+          {
+            status: 401,
+          }
+        );
+      }
     }
 
-    if (!signature) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Missing x-razorpay-signature",
-        },
-        { status: 400 }
-      );
-    }
-
-    let validSignature = false;
+    let payload: RazorpayWebhookPayload;
 
     try {
-      validSignature = verifyRazorpaySignature(
-        rawBody,
-        signature,
-        secret
-      );
+      payload =
+        JSON.parse(rawBody);
     } catch {
-      validSignature = false;
-    }
-
-    if (!validSignature) {
-      console.warn("Invalid Razorpay webhook signature");
-
       return NextResponse.json(
         {
           success: false,
-          error: "Invalid webhook signature",
+          error:
+            "Invalid webhook JSON.",
         },
-        { status: 401 }
-      );
-    }
-
-    const payload = JSON.parse(rawBody);
-
-    const event = payload.event;
-
-    console.log("Razorpay webhook received:", event);
-
-    if (!event) {
-      return NextResponse.json(
         {
-          success: false,
-          error: "Missing event",
-        },
-        { status: 400 }
+          status: 400,
+        }
       );
     }
 
-    /*
-     * payment.failed
-     */
-    if (event === "payment.failed") {
-      const payment = payload.payload?.payment?.entity;
+    const event =
+      payload.event || "";
 
-      if (!payment?.id) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "Payment entity missing",
-          },
-          { status: 400 }
-        );
-      }
-
-      const paymentId = payment.id;
-
-      const amount = Number(payment.amount || 0) / 100;
-
-      const currency = payment.currency || "INR";
-
-      const customerEmail =
-        payment.email ||
-        payment.contact ||
-        "unknown@example.com";
-
-      const failureReason = getFailureReason(payment);
-
-      /*
-       * Idempotency:
-       * If the same payment already exists, update it instead
-       * of creating another transaction.
-       */
-      let transaction = await prisma.transaction.findUnique({
-        where: {
-          paymentId,
-        },
-      });
-
-      if (!transaction) {
-        transaction = await prisma.transaction.create({
-          data: {
-            paymentId,
-            customerEmail,
-            amount,
-            currency,
-            status: "FAILED",
-            failureReason,
-            recoverable: true,
-            recoveryStatus: "PENDING",
-          },
-        });
-      } else {
-        transaction = await prisma.transaction.update({
-          where: {
-            id: transaction.id,
-          },
-          data: {
-            status: "FAILED",
-            failureReason,
-            recoverable: true,
-          },
-        });
-      }
-
-      /*
-       * Save payment event.
-       */
-      await prisma.paymentEvent.create({
-        data: {
-          transactionId: transaction.id,
-          eventType: "payment.failed",
-          channel: payment.method || null,
-          provider: payment.bank || payment.wallet || null,
-          status: "FAILED",
-          failureCode:
-            payment.error_code ||
-            payment.error_reason ||
-            null,
-          latencyMs: null,
-          amount,
-          currency,
-        },
-      });
-
-      /*
-       * Recovery audit event.
-       */
-      await prisma.recoveryEvent.create({
-        data: {
-          transactionId: transaction.id,
-          eventType: "PAYMENT_FAILED",
-          action: "RECOVERY_EVALUATION_REQUIRED",
-          message: `Razorpay payment failed: ${failureReason}`,
-        },
-      });
-
-      console.log(
-        `RECOVR: failed payment captured ${paymentId} ₹${amount}`
-      );
-
-      return NextResponse.json({
-        success: true,
-        event: "payment.failed",
-        transactionId: transaction.id,
-        paymentId,
-        amount,
-        failureReason,
-      });
-    }
+    console.log(
+      "RECOVR Razorpay webhook:",
+      event
+    );
 
     /*
-     * payment.captured
+     * =====================================================
+     * PAYMENT LINK PAID
+     * =====================================================
      */
-    if (event === "payment.captured") {
-      const payment = payload.payload?.payment?.entity;
 
-      if (!payment?.id) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "Payment entity missing",
-          },
-          { status: 400 }
+    if (
+      event ===
+      "payment_link.paid"
+    ) {
+      const paymentLink =
+        payload.payload?.payment_link
+          ?.entity;
+
+      const payment =
+        payload.payload?.payment
+          ?.entity;
+
+      const transactionId =
+        extractRecovrTransactionId(
+          payload
         );
-      }
 
-      const paymentId = payment.id;
-
-      const amount = Number(payment.amount || 0) / 100;
-
-      const transaction = await prisma.transaction.findUnique({
-        where: {
-          paymentId,
-        },
-      });
-
-      /*
-       * A captured payment may exist without a previous
-       * failed event.
-       */
-      if (!transaction) {
-        const created = await prisma.transaction.create({
-          data: {
-            paymentId,
-            customerEmail:
-              payment.email ||
-              payment.contact ||
-              "unknown@example.com",
-            amount,
-            currency: payment.currency || "INR",
-            status: "CAPTURED",
-            recoverable: false,
-            recovered: false,
-          },
-        });
-
-        await prisma.paymentEvent.create({
-          data: {
-            transactionId: created.id,
-            eventType: "payment.captured",
-            channel: payment.method || null,
-            provider: payment.bank || payment.wallet || null,
-            status: "CAPTURED",
-            amount,
-            currency: payment.currency || "INR",
-          },
-        });
+      if (!transactionId) {
+        console.warn(
+          "RECOVR: payment_link.paid received without RECOVR transaction reference."
+        );
 
         return NextResponse.json({
           success: true,
-          event: "payment.captured",
-          paymentId,
-          transactionId: created.id,
-          recovered: false,
+          handled: false,
+          event,
+          message:
+            "Payment Link payment received, but no RECOVR transaction reference was found.",
         });
       }
 
-      /*
-       * If this payment was previously failed,
-       * this becomes an actual recovery.
-       */
-      const wasFailed = transaction.status === "FAILED";
+      const updated =
+        await markTransactionRecovered(
+          transactionId,
 
-      const updated = await prisma.transaction.update({
-        where: {
-          id: transaction.id,
-        },
-        data: {
-          status: "CAPTURED",
+          payment?.id || null,
 
-          ...(wasFailed
-            ? {
-                recovered: true,
-                recoveredAmount: amount,
-                recoveredAt: new Date(),
-                recoveryStatus: "RECOVERED",
-              }
-            : {}),
-        },
-      });
+          payment?.order_id || null,
 
-      await prisma.paymentEvent.create({
-        data: {
-          transactionId: updated.id,
-          eventType: "payment.captured",
-          channel: payment.method || null,
-          provider: payment.bank || payment.wallet || null,
-          status: "CAPTURED",
-          amount,
-          currency: payment.currency || "INR",
-        },
-      });
+          paymentLink?.id || null
+        );
 
-      if (wasFailed) {
-        await prisma.recoveryEvent.create({
-          data: {
-            transactionId: updated.id,
-            eventType: "PAYMENT_RECOVERED",
-            action: "RECOVERED",
-            message: `Payment recovered through Razorpay capture: ₹${amount}`,
+      if (!updated) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "RECOVR transaction not found.",
+            transactionId,
           },
-        });
+          {
+            status: 404,
+          }
+        );
       }
-
-      console.log(
-        wasFailed
-          ? `RECOVR: PAYMENT RECOVERED ${paymentId} ₹${amount}`
-          : `RECOVR: payment captured ${paymentId} ₹${amount}`
-      );
 
       return NextResponse.json({
         success: true,
-        event: "payment.captured",
-        paymentId,
-        transactionId: updated.id,
-        recovered: wasFailed,
-        recoveredAmount: wasFailed ? amount : 0,
+
+        handled: true,
+
+        event,
+
+        recovered: true,
+
+        transactionId,
+
+        paymentId:
+          payment?.id || null,
+
+        paymentLinkId:
+          paymentLink?.id || null,
+
+        transaction:
+          updated,
+
+        message:
+          "RECOVR transaction automatically marked as RECOVERED.",
       });
     }
 
     /*
-     * Other Razorpay events are accepted but ignored.
+     * =====================================================
+     * PAYMENT CAPTURED
+     * =====================================================
+     *
+     * This handles normal Razorpay payment
+     * success events as well.
      */
+
+    if (
+      event ===
+        "payment.captured" ||
+      event ===
+        "payment.authorized"
+    ) {
+      const payment =
+        payload.payload?.payment
+          ?.entity;
+
+      const transactionId =
+        extractRecovrTransactionId(
+          payload
+        );
+
+      if (!transactionId) {
+        return NextResponse.json({
+          success: true,
+          handled: false,
+          event,
+          message:
+            "Payment event received without a RECOVR transaction reference.",
+        });
+      }
+
+      const updated =
+        await markTransactionRecovered(
+          transactionId,
+
+          payment?.id || null,
+
+          payment?.order_id || null,
+
+          null
+        );
+
+      if (!updated) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "RECOVR transaction not found.",
+            transactionId,
+          },
+          {
+            status: 404,
+          }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+
+        handled: true,
+
+        event,
+
+        recovered: true,
+
+        transactionId,
+
+        paymentId:
+          payment?.id || null,
+
+        transaction:
+          updated,
+
+        message:
+          "RECOVR transaction automatically marked as RECOVERED.",
+      });
+    }
+
+    /*
+     * =====================================================
+     * PAYMENT FAILED
+     * =====================================================
+     */
+
+    if (
+      event ===
+        "payment.failed"
+    ) {
+      const payment =
+        payload.payload?.payment
+          ?.entity;
+
+      const transactionId =
+        extractRecovrTransactionId(
+          payload
+        );
+
+      if (!transactionId) {
+        return NextResponse.json({
+          success: true,
+          handled: false,
+          event,
+          message:
+            "Payment failure received without a RECOVR transaction reference.",
+        });
+      }
+
+      await prisma.recoveryEvent.create({
+        data: {
+          transactionId,
+
+          eventType:
+            "RECOVERY_PAYMENT_FAILED",
+
+          action:
+            "NO_ACTION",
+
+          message:
+            `Razorpay reported a failed recovery payment${
+              payment?.id
+                ? ` (${payment.id})`
+                : ""
+            }.`,
+        },
+      });
+
+      return NextResponse.json({
+        success: true,
+
+        handled: true,
+
+        event,
+
+        recovered: false,
+
+        transactionId,
+
+        message:
+          "Recovery payment failure recorded by RECOVR.",
+      });
+    }
+
+    /*
+     * =====================================================
+     * ALL OTHER EVENTS
+     * =====================================================
+     */
+
     return NextResponse.json({
       success: true,
-      received: true,
-      event,
+
       handled: false,
+
+      event,
+
+      message:
+        "Razorpay webhook received.",
     });
-  } catch (error) {
-    console.error("RECOVR Razorpay webhook error:", error);
+  } catch (error: unknown) {
+    console.error(
+      "RECOVR Razorpay webhook error:",
+      error
+    );
 
     return NextResponse.json(
       {
         success: false,
-        error: "Webhook processing failed",
+
+        error:
+          error instanceof Error
+            ? error.message
+            : "Webhook processing failed.",
       },
-      { status: 500 }
+      {
+        status: 500,
+      }
     );
   }
 }

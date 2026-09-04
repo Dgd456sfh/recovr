@@ -7,10 +7,10 @@ type OutcomeRequest = {
 
 function calculateRecoveryProbability(
   action: string | null
-) {
+): number {
   switch (action) {
     case "CONTROLLED_RETRY":
-      return 0.70;
+      return 0.7;
 
     case "PAYMENT_LINK":
       return 0.45;
@@ -20,17 +20,16 @@ function calculateRecoveryProbability(
   }
 }
 
-/*
- * Deterministic simulation.
- *
- * We intentionally do NOT use Math.random().
- * Evaluating the same transaction + action
- * therefore produces the same result every time.
- */
-function deterministicScore(input: string) {
+function deterministicScore(
+  input: string
+): number {
   let hash = 0;
 
-  for (let i = 0; i < input.length; i++) {
+  for (
+    let i = 0;
+    i < input.length;
+    i++
+  ) {
     hash =
       (hash * 31 +
         input.charCodeAt(i)) |
@@ -50,38 +49,30 @@ export async function POST(
       (await request.json()) as OutcomeRequest;
 
     const transactionId =
-      body.transactionId;
+      body.transactionId?.trim();
 
     if (!transactionId) {
       return NextResponse.json(
         {
           success: false,
-
           error:
             "transactionId is required.",
         },
-        {
-          status: 400,
-        }
+        { status: 400 }
       );
     }
 
-    /*
-     * Load recovery case.
-     */
     const transaction =
       await prisma.transaction.findUnique({
         where: {
           id: transactionId,
         },
-
         include: {
           recoveryEvents: {
             orderBy: {
               createdAt: "desc",
             },
-
-            take: 10,
+            take: 20,
           },
         },
       });
@@ -90,18 +81,15 @@ export async function POST(
       return NextResponse.json(
         {
           success: false,
-
           error:
             "Recovery case not found.",
         },
-        {
-          status: 404,
-        }
+        { status: 404 }
       );
     }
 
     /*
-     * Already recovered.
+     * Already recovered
      */
     if (
       transaction.recovered ||
@@ -110,22 +98,38 @@ export async function POST(
     ) {
       return NextResponse.json({
         success: true,
-
         alreadyEvaluated: true,
-
         outcome: "RECOVERED",
-
         recovered: true,
-
         recoveredAmount:
           transaction.recoveredAmount ??
           transaction.amount,
+        transaction,
       });
     }
 
     /*
-     * Only executed/scheduled recovery actions
-     * can have an outcome evaluated.
+     * Payment Link recovery requires an actual
+     * Razorpay Payment Link ID.
+     */
+    if (
+      transaction.recoveryAction ===
+        "PAYMENT_LINK" &&
+      !transaction.razorpayPaymentLinkId
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "No Razorpay Payment Link was found for this recovery case. Generate the Payment Link first.",
+        },
+        { status: 400 }
+      );
+    }
+
+    /*
+     * Only executed recovery states can
+     * have an outcome evaluated.
      */
     const executableStates = [
       "EXECUTED",
@@ -141,13 +145,10 @@ export async function POST(
       return NextResponse.json(
         {
           success: false,
-
           error:
             "No executed recovery action is available for this case.",
         },
-        {
-          status: 400,
-        }
+        { status: 400 }
       );
     }
 
@@ -159,9 +160,6 @@ export async function POST(
         action
       );
 
-    /*
-     * Generate deterministic score.
-     */
     const score =
       deterministicScore(
         transaction.id +
@@ -169,17 +167,15 @@ export async function POST(
           (action ?? "")
       );
 
-    /*
-     * Simulation outcome.
-     */
     const recovered =
       score < probability;
 
     /*
-     * =====================================================
+     * =========================================================
      * RECOVERY SUCCESS
-     * =====================================================
+     * =========================================================
      */
+
     if (recovered) {
       const recoveredAmount =
         transaction.amount;
@@ -206,29 +202,39 @@ export async function POST(
 
             reason:
               "Recovery action successfully recovered the payment.",
+          },
 
+          include: {
             recoveryEvents: {
-              create: {
-                eventType:
-                  "RECOVERY_OUTCOME",
-
-                action:
-                  action,
-
-                message:
-                  `Recovery outcome verified successfully. ₹${recoveredAmount.toLocaleString(
-                    "en-IN"
-                  )} recovered in simulation mode.`,
+              orderBy: {
+                createdAt: "desc",
               },
+              take: 20,
             },
           },
         });
 
+      await prisma.recoveryEvent.create({
+        data: {
+          transactionId:
+            transaction.id,
+
+          eventType:
+            "RECOVERY_OUTCOME",
+
+          action,
+
+          message:
+            `Recovery outcome verified successfully. ₹${recoveredAmount.toLocaleString(
+              "en-IN"
+            )} recovered.`,
+        },
+      });
+
       return NextResponse.json({
         success: true,
 
-        outcome:
-          "RECOVERED",
+        outcome: "RECOVERED",
 
         recovered: true,
 
@@ -238,16 +244,16 @@ export async function POST(
 
         score,
 
-        transaction:
-          updated,
+        transaction: updated,
       });
     }
 
     /*
-     * =====================================================
+     * =========================================================
      * RECOVERY FAILURE
-     * =====================================================
+     * =========================================================
      */
+
     const updated =
       await prisma.transaction.update({
         where: {
@@ -266,24 +272,34 @@ export async function POST(
 
           reason:
             "The executed recovery action did not recover the payment.",
+        },
 
+        include: {
           recoveryEvents: {
-            create: {
-              eventType:
-                "RECOVERY_OUTCOME",
-
-              action:
-                action,
-
-              message:
-                `Recovery outcome evaluated. ${
-                  action ??
-                  "Recovery action"
-                } did not recover the payment in simulation mode.`,
+            orderBy: {
+              createdAt: "desc",
             },
+            take: 20,
           },
         },
       });
+
+    await prisma.recoveryEvent.create({
+      data: {
+        transactionId:
+          transaction.id,
+
+        eventType:
+          "RECOVERY_OUTCOME",
+
+        action,
+
+        message:
+          `Recovery outcome evaluated. ${
+            action ?? "Recovery action"
+          } did not recover the payment.`,
+      },
+    });
 
     return NextResponse.json({
       success: true,
@@ -299,10 +315,9 @@ export async function POST(
 
       score,
 
-      transaction:
-        updated,
+      transaction: updated,
     });
-  } catch (error) {
+  } catch (error: unknown) {
     console.error(
       "Recovery outcome error:",
       error
@@ -311,15 +326,12 @@ export async function POST(
     return NextResponse.json(
       {
         success: false,
-
         error:
           error instanceof Error
             ? error.message
             : "Failed to evaluate recovery outcome.",
       },
-      {
-        status: 500,
-      }
+      { status: 500 }
     );
   }
 }

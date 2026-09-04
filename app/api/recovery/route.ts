@@ -1,312 +1,49 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
-import { evaluateRecovery } from "@/lib/recovery/engine";
+import Razorpay from "razorpay";
 
-type RecoveryAction =
-  | "RETRY"
-  | "PAYMENT_LINK"
-  | "MARK_RECOVERED";
+export const runtime = "nodejs";
 
-/* =========================================================
-   RECOVERY STATE HELPERS
-   ========================================================= */
-
-function isRecoveredTransaction(transaction: {
-  recovered: boolean;
-  status: string;
-  recoveryStatus: string;
-}) {
-  return (
-    transaction.recovered ||
-    transaction.status === "RECOVERED" ||
-    transaction.recoveryStatus === "RECOVERED"
-  );
-}
-
-function hasRecoveryActionBeenExecuted(
-  recoveryStatus: string
-) {
-  return (
-    recoveryStatus === "RETRY_SCHEDULED" ||
-    recoveryStatus === "PAYMENT_LINK_GENERATED" ||
-    recoveryStatus === "EXECUTED"
-  );
-}
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID!,
+  key_secret: process.env.RAZORPAY_KEY_SECRET!,
+});
 
 /* =========================================================
-   GET — RECOVERY COMMAND CENTER
-   ========================================================= */
+   GET /api/recovery
+   Load recovery cases for /cases page
+========================================================= */
 
 export async function GET() {
   try {
-    const transactions =
-      await prisma.transaction.findMany({
-        orderBy: {
-          createdAt: "desc",
-        },
-
-        include: {
-          recoveryEvents: {
-            orderBy: {
-              createdAt: "desc",
-            },
+    const transactions = await prisma.transaction.findMany({
+      orderBy: {
+        createdAt: "desc",
+      },
+      include: {
+        recoveryEvents: {
+          orderBy: {
+            createdAt: "desc",
           },
         },
-      });
-
-    /* =====================================================
-       BUILD RECOVERY CASES
-       ===================================================== */
-
-    const cases = transactions.map((transaction) => {
-      const isRecovered =
-        isRecoveredTransaction(transaction);
-
-      /*
-       * Recovered payments are final.
-       * Do not run the recovery engine again.
-       */
-      const decision = isRecovered
-        ? {
-            recommendation: "NO_ACTION",
-            confidence: 100,
-            reason:
-              "Payment has already been successfully recovered.",
-            priority: "LOW",
-            shouldRecover: false,
-          }
-        : evaluateRecovery(transaction);
-
-      return {
-        id: transaction.id,
-
-        paymentId:
-          transaction.paymentId,
-
-        customerEmail:
-          transaction.customerEmail,
-
-        amount:
-          transaction.amount,
-
-        currency:
-          transaction.currency,
-
-        status:
-          transaction.status,
-
-        failureReason:
-          transaction.failureReason,
-
-        recoverable:
-          transaction.recoverable,
-
-        recovered:
-          transaction.recovered,
-
-        recoveredAmount:
-          transaction.recoveredAmount,
-
-        recoveredAt:
-          transaction.recoveredAt,
-
-        recoveryStatus:
-          transaction.recoveryStatus,
-
-        recoveryAction:
-          transaction.recoveryAction,
-
-        recommendation:
-          decision.recommendation,
-
-        confidence:
-          decision.confidence,
-
-        reason:
-          decision.reason,
-
-        priority:
-          decision.priority,
-
-        shouldRecover:
-          decision.shouldRecover,
-
-        recoveryEvents:
-          transaction.recoveryEvents,
-
-        createdAt:
-          transaction.createdAt,
-
-        updatedAt:
-          transaction.updatedAt,
-      };
+      },
     });
-
-    /* =====================================================
-       ACTIVE RECOVERY CASES
-       ===================================================== */
-
-    /*
-     * An active recovery case must:
-     *
-     * 1. Be recoverable
-     * 2. NOT already be recovered
-     *
-     * This intentionally excludes:
-     *
-     * - Successful transactions
-     * - Non-recoverable transactions
-     * - Already recovered transactions
-     *
-     * Executed actions remain active until the outcome
-     * has been confirmed.
-     */
-    const activeCases =
-      cases.filter(
-        (transaction) =>
-          transaction.recoverable &&
-          !isRecoveredTransaction(
-            transaction
-          )
-      );
-
-    /* =====================================================
-       RECOVERED CASES
-       ===================================================== */
-
-    const recoveredCases =
-      cases.filter(
-        (transaction) =>
-          isRecoveredTransaction(
-            transaction
-          )
-      );
-
-    /* =====================================================
-       REVIEW CASES
-       ===================================================== */
-
-    /*
-     * Review cases are unresolved transactions
-     * whose recovery engine recommends REVIEW.
-     */
-    const reviewCases =
-      cases.filter(
-        (transaction) =>
-          !isRecoveredTransaction(
-            transaction
-          ) &&
-          transaction.recommendation ===
-            "REVIEW"
-      );
-
-    /* =====================================================
-       REVENUE AT RISK
-       ===================================================== */
-
-    const revenueAtRisk =
-      activeCases.reduce(
-        (total, transaction) =>
-          total + transaction.amount,
-        0
-      );
-
-    /* =====================================================
-       RECOVERED REVENUE
-       ===================================================== */
-
-    const recoveredAmount =
-      recoveredCases.reduce(
-        (total, transaction) =>
-          total +
-          (transaction.recoveredAmount ??
-            0),
-        0
-      );
-
-    /* =====================================================
-       TOTAL RECOVERABLE REVENUE
-       ===================================================== */
-
-    const totalRecoverableAmount =
-      transactions
-        .filter(
-          (transaction) =>
-            transaction.recoverable
-        )
-        .reduce(
-          (total, transaction) =>
-            total + transaction.amount,
-          0
-        );
-
-    /* =====================================================
-       RECOVERY RATE
-       ===================================================== */
-
-    const recoveryRate =
-      totalRecoverableAmount > 0
-        ? Math.round(
-            (recoveredAmount /
-              totalRecoverableAmount) *
-              1000
-          ) / 10
-        : 0;
-
-    /* =====================================================
-       RESPONSE
-       ===================================================== */
 
     return NextResponse.json({
       success: true,
-
-      summary: {
-        totalTransactions:
-          transactions.length,
-
-        activeRecoveryCases:
-          activeCases.length,
-
-        reviewRequired:
-          reviewCases.length,
-
-        recoveredCases:
-          recoveredCases.length,
-
-        revenueAtRisk,
-
-        recoveredAmount,
-
-        recoveryRate,
-
-        currency: "INR",
-      },
-
-      /*
-       * IMPORTANT:
-       *
-       * Only unresolved recoverable transactions
-       * are returned to the Recovery Queue.
-       *
-       * This prevents successful and non-recoverable
-       * transactions from appearing as active cases.
-       */
-      cases: activeCases,
+      transactions,
+      cases: transactions,
     });
   } catch (error) {
-    console.error(
-      "GET /api/recovery error:",
-      error
-    );
+    console.error("GET /api/recovery error:", error);
 
     return NextResponse.json(
       {
         success: false,
-
         error:
           error instanceof Error
             ? error.message
-            : "Failed to fetch recovery data.",
+            : "Failed to load recovery cases.",
       },
       {
         status: 500,
@@ -316,482 +53,198 @@ export async function GET() {
 }
 
 /* =========================================================
-   POST — EXECUTE RECOVERY ACTION
-   ========================================================= */
+   POST /api/recovery
+   Verify real Razorpay recovery Payment Link
+========================================================= */
 
-export async function POST(
-  request: Request
-) {
+export async function POST(request: Request) {
   try {
-    const body =
-      await request.json();
+    const body = await request.json();
 
     const transactionId =
-      body.transactionId;
-
-    const requestedAction =
-      body.action as
-        | RecoveryAction
-        | undefined;
-
-    /* =====================================================
-       VALIDATE TRANSACTION ID
-       ===================================================== */
+      typeof body?.transactionId === "string"
+        ? body.transactionId.trim()
+        : "";
 
     if (!transactionId) {
       return NextResponse.json(
         {
           success: false,
-
-          error:
-            "transactionId is required.",
+          error: "transactionId is required.",
         },
-        {
-          status: 400,
-        }
+        { status: 400 }
       );
     }
 
-    /* =====================================================
-       FIND TRANSACTION
-       ===================================================== */
-
     const transaction =
-      await prisma.transaction.findUnique(
-        {
-          where: {
-            id: transactionId,
+      await prisma.transaction.findUnique({
+        where: {
+          id: transactionId,
+        },
+        include: {
+          recoveryEvents: {
+            orderBy: {
+              createdAt: "desc",
+            },
           },
-        }
-      );
+        },
+      });
 
     if (!transaction) {
       return NextResponse.json(
         {
           success: false,
-
-          error:
-            "Transaction not found.",
+          error: "Transaction not found.",
         },
-        {
-          status: 404,
-        }
+        { status: 404 }
       );
     }
 
-    /* =====================================================
-       BLOCK ACTIONS ON RECOVERED TRANSACTIONS
-       ===================================================== */
+    /* Already recovered */
 
-    if (
-      isRecoveredTransaction(
-        transaction
-      )
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-
-          error:
-            "This transaction has already been recovered.",
-        },
-        {
-          status: 409,
-        }
-      );
-    }
-
-    /* =====================================================
-       MARK PAYMENT AS RECOVERED
-       ===================================================== */
-
-    if (
-      requestedAction ===
-      "MARK_RECOVERED"
-    ) {
-      /*
-       * A payment can only be confirmed as recovered
-       * after RECOVR has executed a recovery action.
-       *
-       * Valid previous states:
-       *
-       * RETRY_SCHEDULED
-       * PAYMENT_LINK_GENERATED
-       * EXECUTED
-       */
-      if (
-        !hasRecoveryActionBeenExecuted(
-          transaction.recoveryStatus
-        )
-      ) {
-        return NextResponse.json(
-          {
-            success: false,
-
-            error:
-              "A recovery action must be executed before confirming recovery.",
-          },
-          {
-            status: 400,
-          }
-        );
-      }
-
-      /* =================================================
-         UPDATE TRANSACTION
-         ================================================= */
-
-      const updated =
-        await prisma.transaction.update(
-          {
-            where: {
-              id: transaction.id,
-            },
-
-            data: {
-              status:
-                "RECOVERED",
-
-              recovered:
-                true,
-
-              recoveredAmount:
-                transaction.amount,
-
-              recoveredAt:
-                new Date(),
-
-              recoveryStatus:
-                "RECOVERED",
-            },
-          }
-        );
-
-      /* =================================================
-         CREATE RECOVERY EVENT
-         ================================================= */
-
-      await prisma.recoveryEvent.create(
-        {
-          data: {
-            transactionId:
-              transaction.id,
-
-            eventType:
-              "PAYMENT_RECOVERED",
-
-            action:
-              transaction.recoveryAction,
-
-            message:
-              "Payment recovery was confirmed successfully.",
-          },
-        }
-      );
-
+    if (transaction.recovered) {
       return NextResponse.json({
         success: true,
-
-        action:
-          "MARK_RECOVERED",
-
+        outcome: "RECOVERED",
+        recovered: true,
+        recoveredAmount:
+          transaction.recoveredAmount ??
+          transaction.amount,
+        transaction,
         message:
-          "Payment successfully marked as recovered.",
-
-        transaction:
-          updated,
+          "Transaction has already been recovered.",
       });
     }
 
-    /* =====================================================
-       EVALUATE RECOVERY
-       ===================================================== */
+    /* No payment link yet */
 
-    const decision =
-      evaluateRecovery(transaction);
+    if (!transaction.razorpayPaymentLinkId) {
+      return NextResponse.json({
+        success: true,
+        outcome: "PENDING",
+        recovered: false,
+        recoveredAmount: 0,
+        razorpayStatus: "not_created",
+        transaction,
+        message:
+          "No Razorpay Payment Link exists for this recovery case.",
+      });
+    }
 
-    /* =====================================================
-       PERSIST LATEST DECISION
-       ===================================================== */
+    /* Fetch real Razorpay Payment Link */
 
-    await prisma.transaction.update({
-      where: {
-        id: transaction.id,
-      },
+    let paymentLink: any;
 
-      data: {
-        recommendation:
-          decision.recommendation,
+    try {
+      paymentLink =
+        await razorpay.paymentLink.fetch(
+          transaction.razorpayPaymentLinkId
+        );
+    } catch (error) {
+      console.error(
+        "RECOVR: Unable to fetch Razorpay Payment Link:",
+        error
+      );
 
-        confidence:
-          decision.confidence,
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Unable to verify Razorpay Payment Link.",
+        },
+        { status: 502 }
+      );
+    }
 
-        reason:
-          decision.reason,
-      },
+    console.log("RECOVR payment verification:", {
+      transactionId: transaction.id,
+      paymentLinkId: paymentLink.id,
+      status: paymentLink.status,
     });
 
     /* =====================================================
-       BLOCK NON-RECOVERABLE / REVIEW CASES
-       ===================================================== */
+       PAID
+    ===================================================== */
 
-    if (!decision.shouldRecover) {
-      await prisma.recoveryEvent.create(
-        {
-          data: {
-            transactionId:
-              transaction.id,
+    if (paymentLink.status === "paid") {
+      const recoveredAmount =
+        transaction.amount;
 
-            eventType:
-              "RECOVERY_REVIEW_REQUIRED",
-
-            action:
-              decision.recommendation,
-
-            message:
-              decision.reason,
-          },
-        }
-      );
-
-      return NextResponse.json(
-        {
-          success: false,
-
-          recommendation:
-            decision.recommendation,
-
-          confidence:
-            decision.confidence,
-
-          reason:
-            decision.reason,
-
-          error:
-            "This transaction requires manual review and cannot be automatically recovered.",
-        },
-        {
-          status: 400,
-        }
-      );
-    }
-
-    /* =====================================================
-       VALIDATE REQUESTED ACTION
-       ===================================================== */
-
-    if (
-      requestedAction !==
-        "RETRY" &&
-      requestedAction !==
-        "PAYMENT_LINK"
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-
-          recommendation:
-            decision.recommendation,
-
-          error:
-            "Invalid recovery action.",
-        },
-        {
-          status: 400,
-        }
-      );
-    }
-
-    /* =====================================================
-       ACTION MUST MATCH RECOMMENDATION
-       ===================================================== */
-
-    if (
-      requestedAction !==
-      decision.recommendation
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-
-          recommendedAction:
-            decision.recommendation,
-
-          requestedAction,
-
-          error:
-            "Requested action does not match the recommended recovery strategy.",
-        },
-        {
-          status: 400,
-        }
-      );
-    }
-
-    /* =====================================================
-       DUPLICATE ACTION GUARDRAIL
-       ===================================================== */
-
-    if (
-      hasRecoveryActionBeenExecuted(
-        transaction.recoveryStatus
-      )
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-
-          error:
-            "A recovery action has already been executed for this transaction.",
-
-          recoveryStatus:
-            transaction.recoveryStatus,
-        },
-        {
-          status: 409,
-        }
-      );
-    }
-
-    /* =====================================================
-       EXECUTE CONTROLLED RETRY
-       ===================================================== */
-
-    if (
-      requestedAction ===
-      "RETRY"
-    ) {
       const updated =
-        await prisma.transaction.update(
-          {
-            where: {
-              id: transaction.id,
-            },
-
-            data: {
-              recoveryStatus:
-                "RETRY_SCHEDULED",
-
-              recoveryAction:
-                "CONTROLLED_RETRY",
-
-              recommendation:
-                decision.recommendation,
-
-              confidence:
-                decision.confidence,
-
-              reason:
-                decision.reason,
-            },
-          }
-        );
-
-      /* =================================================
-         RECOVERY EVENT
-         ================================================= */
-
-      await prisma.recoveryEvent.create(
-        {
-          data: {
-            transactionId:
-              transaction.id,
-
-            eventType:
-              "RETRY_SCHEDULED",
-
-            action:
-              "CONTROLLED_RETRY",
-
-            message:
-              "RECOVR scheduled a controlled retry. " +
-              decision.reason,
-          },
-        }
-      );
-
-      return NextResponse.json({
-        success: true,
-
-        action:
-          "RETRY",
-
-        message:
-          "Controlled payment retry scheduled successfully.",
-
-        decision,
-
-        transaction:
-          updated,
-      });
-    }
-
-    /* =====================================================
-       EXECUTE PAYMENT LINK RECOVERY
-       ===================================================== */
-
-    const updated =
-      await prisma.transaction.update(
-        {
+        await prisma.transaction.update({
           where: {
             id: transaction.id,
           },
 
           data: {
-            recoveryStatus:
-              "PAYMENT_LINK_GENERATED",
+            status: "RECOVERED",
 
-            recoveryAction:
-              "PAYMENT_LINK",
+            recovered: true,
 
-            recommendation:
-              decision.recommendation,
+            recoveredAmount,
 
-            confidence:
-              decision.confidence,
+            recoveredAt: new Date(),
+
+            recoveryStatus: "RECOVERED",
 
             reason:
-              decision.reason,
+              "Razorpay Payment Link is marked as paid.",
           },
-        }
-      );
 
-    /* =====================================================
-       RECOVERY EVENT
-       ===================================================== */
+          include: {
+            recoveryEvents: {
+              orderBy: {
+                createdAt: "desc",
+              },
+            },
+          },
+        });
 
-    await prisma.recoveryEvent.create(
-      {
+      await prisma.recoveryEvent.create({
         data: {
-          transactionId:
-            transaction.id,
+          transactionId: transaction.id,
 
           eventType:
-            "PAYMENT_LINK_GENERATED",
+            "RECOVERY_OUTCOME",
 
           action:
+            transaction.recoveryAction ||
             "PAYMENT_LINK",
 
           message:
-            "RECOVR generated a payment recovery link. " +
-            decision.reason,
+            `Razorpay Payment Link ${paymentLink.id} ` +
+            `is marked as paid. ` +
+            `₹${recoveredAmount.toFixed(2)} recovered.`,
         },
-      }
-    );
+      });
+
+      return NextResponse.json({
+        success: true,
+        outcome: "RECOVERED",
+        recovered: true,
+        recoveredAmount,
+        razorpayStatus:
+          paymentLink.status,
+        transaction: updated,
+        message:
+          "Razorpay confirms the recovery payment is paid.",
+      });
+    }
+
+    /* =====================================================
+       NOT PAID
+    ===================================================== */
 
     return NextResponse.json({
       success: true,
-
-      action:
-        "PAYMENT_LINK",
-
+      outcome: "PENDING",
+      recovered: false,
+      recoveredAmount: 0,
+      razorpayStatus:
+        paymentLink.status,
+      transaction,
       message:
-        "Payment link recovery flow generated successfully.",
-
-      decision,
-
-      transaction:
-        updated,
+        "Razorpay has not marked the recovery Payment Link as paid yet.",
     });
   } catch (error) {
     console.error(
@@ -802,15 +255,12 @@ export async function POST(
     return NextResponse.json(
       {
         success: false,
-
         error:
           error instanceof Error
             ? error.message
-            : "Unable to execute recovery action.",
+            : "Unable to verify recovery.",
       },
-      {
-        status: 500,
-      }
+      { status: 500 }
     );
   }
 }
